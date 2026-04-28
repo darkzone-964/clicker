@@ -108,7 +108,7 @@ reportlab  # Optional: for PDF reports
 
 ### 1️⃣ Clone the Repository
 ```bash
-git clone https://github.com/403-linux/clicker.git
+git clone https://github.com/darkzone-964/clicker.git
 cd clicker
 ```
 
