@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 R,G,Y,B,M,C,W,DIM,RST,BOLD = "\033[91m","\033[92m","\033[93m","\033[94m","\033[95m","\033[96m","\033[97m","\033[2m","\033[0m","\033[1m"
 AUTHOR,VERSION,INSTAGRAM = "Clicker Tool","v1.0","@403_linux"
 
-# ✅ FIXED: ASCII art as raw string to avoid escape sequence warnings in Python 3.12+
 ASCII_ART = r"""
 .__  .__        __                 
   ____ |  | |__| ____ |  | __ ___________ 
@@ -589,7 +588,6 @@ def phase_takeover(domain,workspace,av):
     return {"takeover_dir":str(tdir)}
 
 def parse_waf_simple(json_file,output_file):
-    """✅ FIXED: Added missing 'data' after 'for entry in'"""
     if not json_file.exists() or is_file_empty(json_file): return False
     results=[]
     try:
@@ -597,7 +595,7 @@ def parse_waf_simple(json_file,output_file):
             data=json.load(f)
             if isinstance(data,list):
                 seen=set()
-                for entry in   # ✅ FIXED: Added 'data' here
+                for entry in data:
                     url=entry.get('url',''); detected=entry.get('detected',False); waf_name=entry.get('firewall','None') if detected else 'None'
                     if url and url not in seen:
                         seen.add(url); status=f"{G}✓{RST} {waf_name}" if detected else f"{DIM}—{RST} None"
