@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, datetime, html, json, os, re, shutil, subprocess, sys, time, random, urllib.request
+import argparse, datetime, html, json, os, re, shutil, subprocess, sys, time, random, urllib.request, socket
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -25,6 +25,32 @@ args_resolvers = "/usr/share/seclists/Discovery/DNS/resolvers.txt"
 api_keys_global = {}
 RESUME_FILE = None
 GLOBAL_USE_PROXYCHAINS = False
+GLOBAL_HYBRID_PROXY = False
+GLOBAL_PROXY_HEALTH_OK = True
+
+# 🔹 أدوات الـ Passive Recon (تعمل دائمًا مباشرة بدون بروكسي للسرعة والدقة)
+NO_PROXY_TOOLS = {
+    "subfinder", "sublist3r", "chaos", "assetfinder", "github-subdomains", "findomain",
+    "waybackurls", "gau", "crt.sh", "locate", "cat", "sort", "grep", "sed", "awk", "jq"
+}
+
+# 🔹 أدوات الـ Active HTTP (تستفيد من HTTP_PROXY عند تفعيل الهجين)
+ACTIVE_HTTP_TOOLS = {
+    "httpx", "httpx-toolkit", "ffuf", "nuclei", "wafw00f", "katana", "waymore", "mantra",
+    "subzy", "subjack", "leakix"
+}
+
+# 🔹 أدوات الشبكات (TCP/UDP) - تستخدم proxychains فقط إذا طُلب، وإلا تعمل مباشرة
+NETWORK_TOOLS = {
+    "nmap", "naabu", "dnsx", "cdncheck", "puredns", "altdns", "shuffledns", "dnsrecon",
+    "aquatone", "gowitness"
+}
+
+# 🔹 روابط التحميل التلقائي
+FALLBACK_URLS = {
+    "resolvers": "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt",
+    "wordlist": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-110000.txt"
+}
 
 class ProxyManager:
     def __init__(self, proxy=None, proxy_file=None, auto_fetch=False, rotate=False):
@@ -61,17 +87,21 @@ class ProxyManager:
         else:
             print(f"{G}[+] Loaded {len(self.proxies)} valid proxy(ies).{RST}")
 
-    def apply(self, domain=None):
-        if not self.proxies:
-            for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']:
-                os.environ.pop(k, None)
-            return
+    def get_current(self):
+        if not self.proxies: return None
         if self.rotate:
             proxy = self.proxies[self.current_idx]
             self.current_idx = (self.current_idx + 1) % len(self.proxies)
-            if domain: print(f"{DIM}↻ Rotating proxy: {proxy} for {domain}{RST}")
-        else:
-            proxy = self.proxies[0]
+            return proxy
+        return self.proxies[0]
+
+    def apply(self, domain=None):
+        proxy = self.get_current()
+        if not proxy:
+            for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']:
+                os.environ.pop(k, None)
+            return
+        if domain: print(f"{DIM}↻ Rotating proxy: {proxy} for {domain}{RST}")
 
         proxy_url = proxy
         if not any(proxy_url.startswith(p) for p in ["http://", "https://", "socks4://", "socks5://"]):
@@ -84,16 +114,109 @@ class ProxyManager:
         os.environ['https_proxy'] = proxy_url
         os.environ['all_proxy'] = proxy_url
 
-def run_cmd(cmd,timeout=600):
+def check_proxy_health(proxy, timeout=8):
+    if not proxy: return False
+    try:
+        proxy_url = proxy
+        if not any(proxy_url.startswith(p) for p in ["http://", "https://", "socks4://", "socks5://"]):
+            proxy_url = f"http://{proxy_url}"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url}))
+        opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+        with opener.open("https://httpbin.org/ip", timeout=timeout) as res:
+            return res.status == 200
+    except:
+        return False
+
+def ensure_essential_file(file_type, path):
+    if Path(path).exists(): return path
+    fallback_dir = Path.home() / ".clicker" / "wordlists"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    
+    url = FALLBACK_URLS.get(file_type)
+    if not url: return None
+    
+    fallback_path = fallback_dir / f"{file_type}.txt"
+    if fallback_path.exists():
+        print(f"{G}[+] Using cached {file_type}: {fallback_path}{RST}")
+        return fallback_path
+    
+    print(f"{Y}[!] {file_type} not found — downloading fallback...{RST}")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as res:
+            content = res.read().decode()
+            fallback_path.write_text(content, encoding="utf-8")
+        print(f"{G}[+] Downloaded {file_type} to {fallback_path}{RST}")
+        return fallback_path
+    except Exception as e:
+        print(f"{R}[!] Failed to download {file_type}: {e}{RST}")
+        return None
+
+def run_cmd(cmd, timeout=600, tool_name=None, allow_fallback=True):
+    global GLOBAL_HYBRID_PROXY, GLOBAL_USE_PROXYCHAINS, GLOBAL_PROXY_HEALTH_OK
+    
+    use_proxy = True
+    bypass_proxy = False
+    
+    # 🔹 قاعدة صارمة: أدوات الـ Passive تعمل دائمًا بدون بروكسي
+    if tool_name and tool_name in NO_PROXY_TOOLS:
+        bypass_proxy = True
+        use_proxy = False
+        for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']:
+            os.environ.pop(k, None)
+        if args_verbose_output:
+            print(f"{DIM}[hybrid] Bypassed proxy for {tool_name} (Passive/Local){RST}")
+    elif GLOBAL_HYBRID_PROXY and tool_name and tool_name in NETWORK_TOOLS:
+        # أدوات الشبكات لا تحترم HTTP_PROXY، تعمل مباشرة أو عبر proxychains فقط
+        use_proxy = False
+        if args_verbose_output:
+            print(f"{DIM}[hybrid] Direct connection for {tool_name} (TCP/UDP){RST}")
+    elif GLOBAL_HYBRID_PROXY and tool_name and tool_name not in ACTIVE_HTTP_TOOLS:
+        use_proxy = False
+
+    # فحص صحة البروكسي إذا كان نشطًا
+    if use_proxy and GLOBAL_HYBRID_PROXY:
+        current_proxy = os.environ.get('HTTP_PROXY', '').replace('http://', '')
+        if current_proxy and not GLOBAL_PROXY_HEALTH_OK:
+            if not check_proxy_health(current_proxy, timeout=5):
+                if args_verbose_output:
+                    print(f"{Y}[!] Proxy health check failed — temporarily bypassing{RST}")
+                use_proxy = False
+            else:
+                GLOBAL_PROXY_HEALTH_OK = True
+    
+    # بناء الأمر النهائي
     final_cmd = cmd
-    if GLOBAL_USE_PROXYCHAINS:
+    if use_proxy and GLOBAL_USE_PROXYCHAINS:
         pc_bin = shutil.which("proxychains4") or shutil.which("proxychains")
         if pc_bin:
             final_cmd = f"{pc_bin} -q {cmd}"
+    
+    # تنفيذ الأمر
     try:
-        p = subprocess.run(final_cmd,shell=True,check=False,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=timeout)
-        return p.returncode,p.stdout.strip(),p.stderr.strip()
-    except subprocess.TimeoutExpired: return 124,"",f"timeout after {timeout}s"
+        p = subprocess.run(final_cmd, shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+        result = (p.returncode, p.stdout.strip(), p.stderr.strip())
+        
+        # إعادة المحاولة الذكية عند الفشل مع البروكسي
+        if allow_fallback and use_proxy and (p.returncode != 0 or not p.stdout.strip()):
+            if args_verbose_output:
+                print(f"{Y}[!] Command failed/empty with proxy — retrying without proxy{RST}")
+            saved_env = {k: os.environ.get(k) for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']}
+            for k in saved_env: os.environ.pop(k, None)
+            
+            p_retry = subprocess.run(cmd, shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+            
+            for k, v in saved_env.items():
+                if v: os.environ[k] = v
+                else: os.environ.pop(k, None)
+                
+            if p_retry.returncode == 0 and p_retry.stdout.strip():
+                if args_verbose_output:
+                    print(f"{G}[+] Fallback succeeded without proxy{RST}")
+                return (p_retry.returncode, p_retry.stdout.strip(), p_retry.stderr.strip())
+        
+        return result
+    except subprocess.TimeoutExpired:
+        return (124, "", f"timeout after {timeout}s")
 
 def installed(tool): return shutil.which(tool) is not None
 def mkd(p): p.mkdir(parents=True,exist_ok=True)
@@ -101,6 +224,7 @@ def wlines(path,lines,auto_cleanup=True):
     with path.open("w",encoding="utf-8") as f:
         for l in sorted(set(lines)):
             if l.strip(): f.write(l.strip()+"\n")
+    if not path.exists(): path.touch()
     if auto_cleanup: cleanup_empty_file(path)
 def rlines(path):
     if not path.exists(): return []
@@ -229,11 +353,12 @@ def find_file_smart(filename, search_names=None):
     if search_names is None: search_names = [filename]
     found_files = []
     for name in search_names:
-        _, out, _ = run_cmd(f"locate -i '{name}' 2>/dev/null | head -20", timeout=30)
+        _, out, _ = run_cmd(f"locate -i '{name}' 2>/dev/null | head -20", timeout=30, tool_name="locate")
         if out:
             for line in out.splitlines():
                 path = line.strip()
-                if path and os.path.isfile(path): found_files.append(path)
+                if path and os.path.isfile(path) and path.endswith('.txt'):
+                    found_files.append(path)
     common_paths = ["/usr/share/seclists/Discovery/DNS/","/usr/share/wordlists/","/opt/wordlists/",os.path.expanduser("~/wordlists/"),"./wordlists/","/root/wordlists/"]
     for cp in common_paths:
         if os.path.isdir(cp):
@@ -269,35 +394,25 @@ def phase_passive(domain,workspace,api_keys,av):
     prog=PhaseProgress("1 — Passive Subdomain Enumeration",12); source_files=[]
     if "subfinder" in av:
         outfile=pdir/f"{domain}_subfinder.txt"
-        cmd=f'subfinder -d {domain} -silent -all -rl 10 -timeout 30 -max-time 15 -o "{outfile}"'
-        _,out,err=run_cmd(cmd,timeout=480)
+        cmd=f'subfinder -d {domain} -silent -all -rl 15 -timeout 30 -o "{outfile}"'
+        _,out,err=run_cmd(cmd,timeout=480,tool_name="subfinder")
         lines=rlines(outfile) if outfile.exists() else out.splitlines()
         parsed={clean_sub(l,domain) for l in lines}; parsed={x for x in parsed if x}
         wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed)
         logs.append({"tool":"subfinder","count":len(parsed),"stderr":err[:300]}); prog.step(f"subfinder — {G}{len(parsed)} subs{RST}")
         source_files.append(outfile)
     else: logs.append({"tool":"subfinder","status":"skipped","reason":"not installed"}); prog.step("subfinder — skipped")
-    if "sublist3r" in av:
-        outfile=pdir/f"{domain}_sublist3r.txt"
-        cmd=f'sublist3r -d {domain} -e "Google,Bing,Virustotal,Netcraft" -v -o "{outfile}"'
-        _,out,err=run_cmd(cmd,timeout=480)
-        lines=rlines(outfile) if outfile.exists() else out.splitlines()
-        parsed={clean_sub(l,domain) for l in lines}; parsed={x for x in parsed if x}
-        wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed)
-        logs.append({"tool":"sublist3r","count":len(parsed),"stderr":err[:300]}); prog.step(f"sublist3r — {G}{len(parsed)} subs{RST}")
-        source_files.append(outfile)
-    else: logs.append({"tool":"sublist3r","status":"skipped","reason":"not installed"}); prog.step("sublist3r — skipped")
     if api_keys.get("CHAOS_API_KEY") and "chaos" in av:
         outfile=pdir/f"{domain}_chaos.txt"
         cmd=f'chaos -d {domain} -silent -key {api_keys["CHAOS_API_KEY"]}'
-        _,out,err=run_cmd(cmd,timeout=480)
+        _,out,err=run_cmd(cmd,timeout=480,tool_name="chaos")
         parsed={clean_sub(l,domain) for l in out.splitlines()}; parsed={x for x in parsed if x}
         wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed)
         logs.append({"tool":"chaos","count":len(parsed),"stderr":err[:300]}); prog.step(f"chaos — {G}{len(parsed)} subs{RST}")
         source_files.append(outfile)
     if "assetfinder" in av:
         outfile=pdir/f"{domain}_assetfinder.txt"
-        cmd=f'assetfinder --subs-only {domain}'; _,out,err=run_cmd(cmd,timeout=480)
+        cmd=f'assetfinder --subs-only {domain}'; _,out,err=run_cmd(cmd,timeout=480,tool_name="assetfinder")
         parsed={clean_sub(l,domain) for l in out.splitlines()}; parsed={x for x in parsed if x}
         wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed)
         logs.append({"tool":"assetfinder","count":len(parsed),"stderr":err[:300]}); prog.step(f"assetfinder — {G}{len(parsed)} subs{RST}")
@@ -305,7 +420,7 @@ def phase_passive(domain,workspace,api_keys,av):
     if api_keys.get("GITHUB_TOKEN") and "github-subdomains" in av:
         outfile=pdir/f"{domain}_github.txt"
         cmd=f'github-subdomains -d {domain} -t {api_keys["GITHUB_TOKEN"]} -q -raw -o "{outfile}"'
-        _,out,err=run_cmd(cmd,timeout=480)
+        _,out,err=run_cmd(cmd,timeout=480,tool_name="github-subdomains")
         lines=rlines(outfile) if outfile.exists() else out.splitlines()
         parsed={clean_sub(l,domain) for l in lines}; parsed={x for x in parsed if x}
         wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed)
@@ -313,31 +428,31 @@ def phase_passive(domain,workspace,api_keys,av):
         source_files.append(outfile)
     if "findomain" in av:
         outfile=pdir/f"{domain}_findomain.txt"
-        cmd=f'findomain -t {domain} -q --rate-limit 1'; _,out,err=run_cmd(cmd,timeout=480)
+        cmd=f'findomain -t {domain} -q --rate-limit 1'; _,out,err=run_cmd(cmd,timeout=480,tool_name="findomain")
         wlines(outfile,out.splitlines(),auto_cleanup=False)
         parsed={clean_sub(l,domain) for l in out.splitlines()}; parsed={x for x in parsed if x}
         collected.update(parsed); logs.append({"tool":"findomain","count":len(parsed),"stderr":err[:300]}); prog.step(f"findomain — {G}{len(parsed)} subs{RST}")
         source_files.append(outfile)
     if "curl" in av and "jq" in av:
         outfile=pdir/f"{domain}_crtsh.txt"
-        cmd=f'curl -s --max-time 30 --retry 2 --user-agent "Mozilla/5.0" "https://crt.sh/?q=%25.{domain}&output=json" | jq -r \'.[].name_value\' 2>/dev/null | grep -F "{domain}" | grep -v r"\\*\\." | sort -u'
-        _,out,err=run_cmd(cmd,timeout=480)
+        cmd=f'curl -s --max-time 30 --retry 2 --user-agent "Mozilla/5.0" "https://crt.sh/?q=%25.{domain}&output=json" | jq -r \'.[].name_value\' 2>/dev/null | grep -F "{domain}" | sort -u'
+        _,out,err=run_cmd(cmd,timeout=480,tool_name="crt.sh")
         parsed={clean_sub(l,domain) for l in out.splitlines()}; parsed={x for x in parsed if x}
         wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed)
         logs.append({"tool":"crt.sh","count":len(parsed),"stderr":err[:300]}); prog.step(f"crt.sh — {G}{len(parsed)} subs{RST}")
         source_files.append(outfile)
     if "waybackurls" in av:
         outfile=pdir/f"{domain}_waybackurls.txt"
-        cmd=f'echo "{domain}" | waybackurls | sort -u | grep -vE r"\\.(jpg|png|gif|css|js|svg|ico)$" | grep -F "{domain}"'
-        _,out,err=run_cmd(cmd,timeout=480)
+        cmd=f'echo "{domain}" | waybackurls | sort -u | grep -F "{domain}"'
+        _,out,err=run_cmd(cmd,timeout=480,tool_name="waybackurls")
         parsed=extract_hosts_from_urls(out.splitlines(),domain); parsed={x for x in parsed if x}
         wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed)
         logs.append({"tool":"waybackurls","count":len(parsed),"stderr":err[:300]}); prog.step(f"waybackurls — {G}{len(parsed)} subs{RST}")
         source_files.append(outfile)
     if "gau" in av:
         outfile=pdir/f"{domain}_gau.txt"
-        cmd=f'echo "{domain}" | gau --subs --timeout 10 --threads 2 | grep -F "{domain}" | grep -v r"\\*\\." | grep -vE r"\\.(jpg|png|gif|css|js|svg|ico|woff|woff2|pdf)$" | sort -u'
-        _,out,err=run_cmd(cmd,timeout=480)
+        cmd=f'echo "{domain}" | gau --subs --timeout 10 --threads 2 | grep -F "{domain}" | sort -u'
+        _,out,err=run_cmd(cmd,timeout=480,tool_name="gau")
         parsed=extract_hosts_from_urls(out.splitlines(),domain); parsed={x for x in parsed if x}
         wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed)
         logs.append({"tool":"gau","count":len(parsed),"stderr":err[:300]}); prog.step(f"gau — {G}{len(parsed)} subs{RST}")
@@ -359,24 +474,22 @@ def phase_active_subs(domain,workspace,passive,av):
     if args_skip_active_subs: print(f"  {Y}[!] Skipping active subdomain enumeration (--skip-active-subs){RST}"); return {"active_subs":[],"active_file":None}
     pdir=workspace/domain/"passive"; adir=workspace/domain/"active"; mkd(adir)
     passive_subs_file=pdir/"allsubs.txt"; passive_subs=rlines(passive_subs_file) if passive_subs_file.exists() else []
-    wordlist_path = Path(args_wordlist); resolvers_path = Path(args_resolvers)
-    if not wordlist_path.exists():
-        print(f"  {Y}[!] Wordlist not found: {wordlist_path}{RST}")
-        found = find_file_smart("wordlist", ["subdomains-top1million-20000.txt","subdomains-top1million-5000.txt","subdomains.txt","wordlist.txt","dns-bruteforce.txt","namelist.txt"])
-        chosen = ask_user_for_file("wordlist", found)
-        if chosen: wordlist_path = Path(chosen)
-        else: print(f"  {Y}[!] Skipping active subdomain enumeration — no wordlist{RST}"); return {"active_subs":[], "active_file":None}
-    if not resolvers_path.exists():
-        print(f"  {Y}[!] Resolvers file not found: {resolvers_path}{RST}")
-        found = find_file_smart("resolvers", ["resolvers.txt","resolvers","dns-resolvers.txt","nameservers.txt","dns.txt"])
-        chosen = ask_user_for_file("resolvers", found)
-        if chosen: resolvers_path = Path(chosen)
-        else: print(f"  {Y}[!] Skipping active subdomain enumeration — no resolvers{RST}"); return {"active_subs":[], "active_file":None}
+    
+    wordlist_path = Path(args_wordlist)
+    if not wordlist_path.exists(): wordlist_path = ensure_essential_file("wordlist", wordlist_path)
+    resolvers_path = Path(args_resolvers)
+    if not resolvers_path.exists(): resolvers_path = ensure_essential_file("resolvers", resolvers_path)
+    
+    if not wordlist_path or not wordlist_path.exists():
+        print(f"  {Y}[!] Wordlist not found and fallback download failed{RST}"); return {"active_subs":[], "active_file":None}
+    if not resolvers_path or not resolvers_path.exists():
+        print(f"  {Y}[!] Resolvers file not found and fallback download failed{RST}"); return {"active_subs":[], "active_file":None}
+    
     prog=PhaseProgress("1.5 — Active Subdomain Enumeration",5); active_subs=set(); temp_files=[]
     if "puredns" in av:
         puredns_out=adir/"puredns_output.txt"
         cmd=f'puredns bruteforce {wordlist_path} {domain} --resolvers {resolvers_path} --rate-limit 150 --rate-limit-trusted 100 --threads 20 --wildcard-tests 5 --wildcard-batch 100 --write {puredns_out} --quiet'
-        run_cmd(cmd,timeout=1800)
+        run_cmd(cmd,timeout=1800,tool_name="puredns")
         if puredns_out.exists():
             parsed={clean_sub(l,domain) for l in rlines(puredns_out)}; parsed={x for x in parsed if x}
             active_subs.update(parsed); temp_files.append(puredns_out)
@@ -385,10 +498,10 @@ def phase_active_subs(domain,workspace,passive,av):
     if "altdns" in av and "shuffledns" in av and passive_subs:
         permuted,shuffled,shuffledns_out=adir/"permuted_subs.txt",adir/"shuffled_subs.txt",adir/"shuffledns_output.txt"
         cmd=f'altdns -i {passive_subs_file} -o {permuted} -w {wordlist_path} -n -r -d 1.1.1.1 -t 40 -s {shuffled}'
-        run_cmd(cmd,timeout=600)
+        run_cmd(cmd,timeout=600,tool_name="altdns")
         if shuffled.exists() and rlines(shuffled):
             cmd=f'shuffledns -d {domain} -list {shuffled} -r {resolvers_path} -o {shuffledns_out} -silent -t 50 -retries 2 -strict-wildcard -batch-size 10000'
-            run_cmd(cmd,timeout=1800)
+            run_cmd(cmd,timeout=1800,tool_name="shuffledns")
             if shuffledns_out.exists():
                 parsed={clean_sub(l,domain) for l in rlines(shuffledns_out)}; parsed={x for x in parsed if x}
                 active_subs.update(parsed); temp_files.extend([permuted,shuffled,shuffledns_out])
@@ -397,7 +510,7 @@ def phase_active_subs(domain,workspace,passive,av):
     if "dnsrecon" in av:
         dnsrecon_csv=adir/f"{domain}_dnsrecon.csv"
         cmd=f'dnsrecon -d {domain} -t brt -D {wordlist_path} -n 8.8.8.8,1.1.1.1,9.9.9.9 -f -s -a --threads 20 --lifetime 5 -c {dnsrecon_csv} -x {adir}/{domain}_dnsrecon.xml'
-        run_cmd(cmd,timeout=1800)
+        run_cmd(cmd,timeout=1800,tool_name="dnsrecon")
         if dnsrecon_csv.exists():
             with open(dnsrecon_csv) as f:
                 for line in f:
@@ -412,7 +525,7 @@ def phase_active_subs(domain,workspace,passive,av):
     if "ffuf" in av:
         ffuf_json=adir/"ffuf_subs.json"
         cmd=f'ffuf -u https://FUZZ.{domain} -w {wordlist_path} -mc 200,301,302,403,404 -t 20 -rate 30 -timeout 10 -ac -se -of json -o {ffuf_json} -H "User-Agent: Mozilla/5.0" -s'
-        run_cmd(cmd,timeout=1800)
+        run_cmd(cmd,timeout=1800,tool_name="ffuf")
         if ffuf_json.exists():
             try:
                 with open(ffuf_json) as f:
@@ -429,7 +542,7 @@ def phase_active_subs(domain,workspace,passive,av):
     active_file=pdir/"active_subs.txt"; wlines(active_file,active_subs,auto_cleanup=False)
     cleanup_source_files_after_merge(temp_files,label="active-subs-temp")
     merged_file=pdir/"allsubs_final.txt"
-    run_cmd(f'cat {passive_subs_file} {active_file} 2>/dev/null | sort -u > {merged_file}')
+    run_cmd(f'cat {passive_subs_file} {active_file} 2>/dev/null | sort -u > {merged_file}', tool_name="cat")
     prog.done_phase()
     total_passive,total_active,total_merged=len(passive_subs),len(active_subs),len(rlines(merged_file))
     print(f"  {BOLD}Passive subs : {G}{total_passive}{RST}\n  {BOLD}Active subs  : {C}{total_active}{RST} {DIM}(+{total_active} new){RST}\n  {BOLD}Total merged : {G}{total_merged}{RST}")
@@ -444,35 +557,35 @@ def phase_response_filter(domain,workspace,passive,av,active_result=None):
     httpx_bin="httpx-toolkit" if "httpx-toolkit" in av else ("httpx" if "httpx" in av else None)
     if httpx_bin:
         cmd=f"{httpx_bin} -l {high_val} -sc -td -cl -server -title -ip -silent -t 15 -rl 8 -timeout 5 -retries 1 -random-agent -follow-redirects -o {adir/'details.txt'}"
-        run_cmd(cmd,timeout=600); results["details"]=rlines(adir/"details.txt")
+        run_cmd(cmd,timeout=600,tool_name=httpx_bin); results["details"]=rlines(adir/"details.txt")
     prog.step("high-value details scan"); cleanup_empty_file(adir/"details.txt","details")
     alive_file=adir/"alive.txt"
     if httpx_bin:
         cmd=f"{httpx_bin} -l {allsubs_file} -mc 200,302 -silent -t 15 -rl 8 -timeout 5 -retries 1 -random-agent -follow-redirects -o {alive_file}"
-        run_cmd(cmd,timeout=900); results["alive"]=rlines(alive_file)
+        run_cmd(cmd,timeout=900,tool_name=httpx_bin); results["alive"]=rlines(alive_file)
     prog.step(f"alive 200/302 — {G}{len(results['alive'])} hosts{RST}")
     alive2_file=adir/"2alive.txt"
     if httpx_bin:
         cmd=f"{httpx_bin} -l {allsubs_file} -ports 80,8443,8080,8000 -silent -t 15 -rl 8 -timeout 5 -retries 1 -random-agent -follow-redirects -o {alive2_file}"
-        run_cmd(cmd,timeout=600)
+        run_cmd(cmd,timeout=600,tool_name=httpx_bin)
     prog.step("alive extra ports (80,8443,8080,8000)")
     alive3_file=adir/"3alive.txt"
     if "naabu" in av:
         cmd=f"naabu -list {allsubs_file} -port 80,443,8000,8080 -silent -s s -rate 200 -c 10 -timeout 1500 -retries 1 -o {alive3_file}"
-        run_cmd(cmd,timeout=900)
+        run_cmd(cmd,timeout=900,tool_name="naabu")
     prog.step("naabu fallback liveness")
     f403_file=adir/"403subs.txt"
     if httpx_bin:
         cmd=f"{httpx_bin} -l {allsubs_file} -mc 403 -silent -t 15 -rl 8 -timeout 5 -retries 1 -random-agent -follow-redirects -o {f403_file}"
-        run_cmd(cmd,timeout=600); results["f403"]=rlines(f403_file)
+        run_cmd(cmd,timeout=600,tool_name=httpx_bin); results["f403"]=rlines(f403_file)
     prog.step(f"403 filter — {Y}{len(results['f403'])} hosts{RST}"); cleanup_empty_file(f403_file,"403")
     f404_file=adir/"404subs.txt"
     if httpx_bin:
         cmd=f"{httpx_bin} -l {allsubs_file} -mc 404 -silent -t 15 -rl 8 -timeout 5 -retries 1 -random-agent -follow-redirects -o {f404_file}"
-        run_cmd(cmd,timeout=600); results["f404"]=rlines(f404_file)
+        run_cmd(cmd,timeout=600,tool_name=httpx_bin); results["f404"]=rlines(f404_file)
     prog.step(f"404 filter — {R}{len(results['f404'])} hosts{RST}"); cleanup_empty_file(f404_file,"404")
     source_files=[alive_file,alive2_file,alive3_file]; success_file=adir/"success-response.txt"
-    run_cmd(f"cat {alive_file} {alive2_file} {alive3_file} 2>/dev/null | sort -u > {success_file}"); prog.step("merge → success-response.txt")
+    run_cmd(f"cat {alive_file} {alive2_file} {alive3_file} 2>/dev/null | sort -u > {success_file}", tool_name="cat"); prog.step("merge → success-response.txt")
     cleanup_source_files_after_merge([f for f in source_files if f.exists()],label="response-filter"); prog.done_phase()
     if args_verbose_output:
         show_file_content(success_file,"success-response.txt - Alive Hosts (200/302)",max_lines=40)
@@ -485,16 +598,16 @@ def phase_tech_detect(domain,workspace,av):
     httpx_bin="httpx-toolkit" if "httpx-toolkit" in av else ("httpx" if "httpx" in av else None)
     if httpx_bin and sucf.exists():
         cmd=f"{httpx_bin} -l {sucf} -r 8.8.8.8,1.1.1.1 -sc -td -cl -server -title -ip -fr -silent -t 15 -rl 8 -timeout 10 -retries 1 -random-agent -o {techf}"
-        run_cmd(cmd,timeout=1200)
+        run_cmd(cmd,timeout=1200,tool_name=httpx_bin)
     prog.step(f"httpx tech detection → {techf.name}")
     if techf.exists():
         cmd=f"grep -oP r'\\b(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){{3}}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\b' {techf} | sort -u > {ipsf}"
-        run_cmd(cmd,timeout=300)
+        run_cmd(cmd,timeout=300,tool_name="grep")
     prog.step(f"IP extraction → {ipsf.name}")
     if not cleanup_empty_file(ipsf,"ips"): print(f"  {G}✔{RST} ips.txt — {len(rlines(ipsf))} unique IPs{RST}")
     if techf.exists():
         cmd=f"sed 's/\\x1b\\[[0-9;]*m//g' {techf} | grep -E r'\\[(200|301|302)(,[200])?\\]' | awk '{{print $1}}' | sort -u > {alivef}"
-        run_cmd(cmd,timeout=300)
+        run_cmd(cmd,timeout=300,tool_name="sed")
     prog.step(f"alive-final re-filter → {alivef.name}")
     if not cleanup_empty_file(alivef,"alive-final"): print(f"  {G}✔{RST} alive-final.txt — {len(rlines(alivef))} hosts{RST}")
     prog.done_phase()
@@ -510,24 +623,24 @@ def phase_ports(domain,workspace,av):
     resolved=adir/"resolved-ips-full.txt"
     if "dnsx" in av:
         cmd=f"dnsx -l {allsubs} -resp-only -a -silent -t 50 -retry 1 -timeout 500 -r 8.8.8.8,1.1.1.1 -o {resolved}"
-        run_cmd(cmd,timeout=900)
+        run_cmd(cmd,timeout=900,tool_name="dnsx")
     prog.step("dnsx resolve all subdomains")
     all_ips=adir/"all-ips-final.txt"; merge_sources=[ipsf,resolved] if resolved.exists() else [ipsf]
-    cmd=f'{{ cat {ipsf} {resolved} 2>/dev/null || true; }} | grep -v \'\' | sort -u > {all_ips}'; run_cmd(cmd,timeout=300)
+    cmd=f'{{ cat {ipsf} {resolved} 2>/dev/null || true; }} | grep -v \'\' | sort -u > {all_ips}'; run_cmd(cmd,timeout=300,tool_name="cat")
     prog.step("merge all IPs → all-ips-final.txt"); cleanup_source_files_after_merge([f for f in merge_sources if f.exists()],label="ip-source")
     cdn_res,real_ips=adir/"cdn-results.txt",adir/"real-ips.txt"
     if "cdncheck" in av:
-        cmd=f"cat {all_ips} | cdncheck -silent -resp -r 8.8.8.8,1.1.1.1 -retry 1 -o {cdn_res}"; run_cmd(cmd,timeout=300)
+        cmd=f"cat {all_ips} | cdncheck -silent -resp -r 8.8.8.8,1.1.1.1 -retry 1 -o {cdn_res}"; run_cmd(cmd,timeout=300,tool_name="cdncheck")
     prog.step("CDN detection")
     if "cdncheck" in av:
         cmd=f"cat {all_ips} | cdncheck -silent -resp -r 8.8.8.8,1.1.1.1 -retry 1 | grep -ivE 'cloudflare|akamai|fastly|cloudfront|incapsula|sucuri|aws|azure|google' | awk '{{print $1}}' | sort -u > {real_ips}"
-        run_cmd(cmd,timeout=300)
+        run_cmd(cmd,timeout=300,tool_name="cdncheck")
     prog.step("real-IP extraction")
     if real_ips.exists() and not cleanup_empty_file(real_ips,"real-ips"): print(f"  {G}✔{RST} real-ips.txt — {len(rlines(real_ips))} non-CDN IPs{RST}")
     open_ports_json,open_ports_txt=adir/"open-ports-full.json",adir/"open-ports-full.txt"
     if "naabu" in av and real_ips.exists():
         cmd=f"naabu -list {real_ips} -p {PORTS_FULL} -rate 150 -c 15 -retries 1 -timeout 1500 -Pn -s s -verify -scan-all-ips -ip-version 4 -silent -json -o {open_ports_json}"
-        run_cmd(cmd,timeout=2400)
+        run_cmd(cmd,timeout=2400,tool_name="naabu")
         if open_ports_json.exists():
             formatted=[]
             try:
@@ -556,16 +669,16 @@ def phase_ports(domain,workspace,av):
         if ips_to_scan:
             ip_list=adir/"nmap-targets.txt"; wlines(ip_list,ips_to_scan,auto_cleanup=False)
             cmd=f"nmap -iL {ip_list} -sC -sV --open -T3 -Pn -n --version-light --max-retries 2 --host-timeout 30m --max-rate 100 --scan-delay 200ms --randomize-hosts -p 21,22,23,25,53,80,110,139,143,389,443,445,993,995,1433,1521,3306,3389,5432,5900,6379,8080,8443,9200,27017 -oA {adir/'nmap-scripts'} --reason --open"
-            run_cmd(cmd,timeout=3600)
+            run_cmd(cmd,timeout=3600,tool_name="nmap")
             if (adir/"nmap-scripts.nmap").exists():
                 cmd=f"grep -iE r'vuln(erability|erable)?|CVE-[0-9]{{4}}-[0-9]{{4,}}|sqli|xss|injection|exploit|weak|default.*cred|anonymous|auth.*bypass|priv.*escalat|misconfig' {adir/'nmap-scripts.nmap'} | grep -vE r'^#|^\\s*$|^Nmap scan report|^Host:|^Port:' | sort -u > {nmap_results}"
-                run_cmd(cmd,timeout=300)
+                run_cmd(cmd,timeout=300,tool_name="grep")
                 if not cleanup_empty_file(nmap_results,"nmap-vulns"): print(f"  {G}✔{RST} nmap-scripts.txt — {C}{len(rlines(nmap_results))} potential findings{RST}")
     prog.step("nmap -sC vulnerability scripts scan")
     open_subs_json,open_subs_txt=adir/"open-ports-subs.json",adir/"open-ports-subs.txt"
     if "naabu" in av:
         cmd=f"naabu -list {allsubs} -p {PORTS_FULL} -rate 100 -c 15 -retries 1 -timeout 2000 -Pn -s s -verify -scan-all-ips -ip-version 4 -silent -json -exclude-cdn -o {open_subs_json}"
-        run_cmd(cmd,timeout=2400)
+        run_cmd(cmd,timeout=2400,tool_name="naabu")
         if open_subs_json.exists():
             formatted=[]
             try:
@@ -587,17 +700,17 @@ def phase_ports(domain,workspace,av):
     prog.step("naabu fallback scan + format"); cleanup_empty_file(open_subs_txt,"fallback-ports")
     hv_ips=adir/"high-value-ips.txt"
     if "dnsx" in av and highval.exists():
-        cmd=f"dnsx -l {highval} -a -resp-only -silent -r 8.8.8.8,1.1.1.1,9.9.9.9 -t 50 -retry 1 -timeout 1500 -o {hv_ips}"; run_cmd(cmd,timeout=300)
+        cmd=f"dnsx -l {highval} -a -resp-only -silent -r 8.8.8.8,1.1.1.1,9.9.9.9 -t 50 -retry 1 -timeout 1500 -o {hv_ips}"; run_cmd(cmd,timeout=300,tool_name="dnsx")
     prog.step("dnsx resolve high-value subs")
     if "nmap" in av and hv_ips.exists():
         cmd=f"nmap -iL {hv_ips} -sC -sV --open -Pn -n -T3 --version-light --max-rate 80 --scan-delay 150ms --max-retries 2 --host-timeout 20m --randomize-hosts -p 21,22,23,25,53,80,443,3306,3389,5432,5900,6379,8080,8443,9200,27017 --script=banner,http-title,ssl-cert,vuln -oA {adir/'nmap-highvalue'} --reason"
-        run_cmd(cmd,timeout=3600)
+        run_cmd(cmd,timeout=3600,tool_name="nmap")
     prog.step("nmap deep scan on high-value IPs")
     shodan_out,shodan_err=adir/"shodan-results.txt",adir/"shodan-errors.log"
     if api_keys_global.get("SHODAN_API") and "curl" in av and "jq" in av and ipsf.exists():
         key=api_keys_global["SHODAN_API"]
         script=f'while IFS= read -r ip; do [[ -z "$ip" || "$ip" =~ ^# ]] && continue; result=$(curl -s --max-time 20 --retry 1 --user-agent "Mozilla/5.0" "https://api.shodan.io/shodan/host/${{ip}}?key={key}" -H "Accept: application/json" 2>/dev/null); if echo "$result" | jq -e \'.error\' >/dev/null 2>&1; then error_msg=$(echo "$result" | jq -r \'.error // "Unknown error"\'); echo "[$(date +%H:%M:%S)] ⚠️ $ip: $error_msg" >&2; [[ "$error_msg" =~ [Rr]ate.*limit|[Ll]imit|429 ]] && sleep 10 || sleep 2; continue; else echo "$result" | jq -r --arg ip "$ip" r"\"\\($ip) | Ports: \\(.ports // [] | join(\", \")) | Vulns: \\(.vulns // [] | join(\", \")) | Org: \\(.org // \"N/A\") | Country: \\(.country_name // \"N/A\")\"" ; fi; sleep 1; done < <(grep -oE r\'^([0-9]{{1,3}}\\\\.){{3}}[0-9]{{1,3}}$\' {ipsf} | sort -u) > {shodan_out} 2> {shodan_err}'
-        run_cmd(script,timeout=600)
+        run_cmd(script,timeout=600,tool_name="curl")
     prog.step("Shodan IP lookup"); cleanup_empty_file(shodan_out,"shodan"); prog.done_phase()
     if args_verbose_output:
         if open_ports_txt.exists() and not is_file_empty(open_ports_txt): show_file_content(open_ports_txt,"open-ports-full.txt - Discovered Open Ports",max_lines=40)
@@ -607,17 +720,17 @@ def phase_ports(domain,workspace,av):
 def phase_takeover(domain,workspace,av):
     adir=workspace/domain/"active"; tdir=workspace/domain/"takeover"; mkd(tdir); f404=adir/"404subs.txt"; prog=PhaseProgress("5 — Subdomain Takeover Detection",3)
     if "subzy" in av and f404.exists() and not is_file_empty(f404):
-        subzy_out=tdir/'subzy-results.txt'; cmd=f'subzy run --targets {f404} --concurrency 5 --timeout 8 --hide_fails --vuln | tee {subzy_out}'; run_cmd(cmd,timeout=600); cleanup_empty_file(subzy_out,'subzy')
+        subzy_out=tdir/'subzy-results.txt'; cmd=f'subzy run --targets {f404} --concurrency 5 --timeout 8 --hide_fails --vuln | tee {subzy_out}'; run_cmd(cmd,timeout=600,tool_name="subzy"); cleanup_empty_file(subzy_out,'subzy')
     prog.step("subzy takeover check")
     if "subjack" in av and f404.exists() and not is_file_empty(f404):
-        subjack_out=tdir/'subjack-results.json'; cmd=f'subjack -w {f404} -t 8 -timeout 10 -ssl -o {subjack_out}'; run_cmd(cmd,timeout=600); cleanup_empty_file(subjack_out,'subjack')
+        subjack_out=tdir/'subjack-results.json'; cmd=f'subjack -w {f404} -t 8 -timeout 10 -ssl -o {subjack_out}'; run_cmd(cmd,timeout=600,tool_name="subjack"); cleanup_empty_file(subjack_out,'subjack')
     prog.step("subjack takeover check")
     if "nuclei" in av and f404.exists() and not is_file_empty(f404):
         nuclei_out=tdir/'nuclei-takeover.txt'; tpl=Path("takeover.yaml")
         if tpl.exists(): base_cmd=f"nuclei -list {f404} -t {tpl} -silent"
         else: base_cmd=f"nuclei -list {f404} -tags takeover -silent"
         cmd=f'{base_cmd} -rl 10 -c 5 -timeout 8 -retries 1 -fr -no-interactsh -nmhe -headless-concurrency 1 -headless-bulk-size 1 | tee {nuclei_out}'
-        run_cmd(cmd,timeout=1200); cleanup_empty_file(nuclei_out,'nuclei-takeover')
+        run_cmd(cmd,timeout=1200,tool_name="nuclei"); cleanup_empty_file(nuclei_out,'nuclei-takeover')
     prog.step("nuclei takeover template"); prog.done_phase()
     if args_verbose_output:
         for fname in ['subzy-results.txt','subjack-results.json','nuclei-takeover.txt']:
@@ -631,7 +744,7 @@ def phase_waf(domain,workspace,av):
     if "wafw00f" in av and alivef.exists() and not is_file_empty(alivef):
         batch_prefix=str(wdir/"batch_")
         cmd=f'split -l 50 {alivef} "{batch_prefix}" && for f in "{batch_prefix}"*; do wafw00f -i "$f" -a -T 10 --format json --no-colors; sleep 30; done >> "{waf_json}" && rm -f "{batch_prefix}"*'
-        run_cmd(cmd,timeout=3600)
+        run_cmd(cmd,timeout=3600,tool_name="wafw00f")
         if waf_json.exists() and not is_file_empty(waf_json):
             try:
                 content=waf_json.read_text(encoding="utf-8"); all_results=[]; decoder=json.JSONDecoder(); idx=0
@@ -646,7 +759,6 @@ def phase_waf(domain,workspace,av):
                 waf_json.write_text(json.dumps(all_results),encoding="utf-8")
             except: pass
             
-        # ✅ FIX: Defined the function outside the condition to avoid scope issues and fixed syntax
         def parse_waf_simple_inner(json_file, output_file):
             if not json_file.exists() or is_file_empty(json_file): return False
             results=[]
@@ -655,8 +767,7 @@ def phase_waf(domain,workspace,av):
                     data=json.load(f)
                     if isinstance(data,list):
                         seen=set()
-                        # ✅ FIX: Added 'data' explicitly
-                        for entry in data:
+                        for entry in data: 
                             url=entry.get('url',''); detected=entry.get('detected',False); waf_name=entry.get('firewall','None') if detected else 'None'
                             if url and url not in seen:
                                 seen.add(url); status=f"{G}✓{RST} {waf_name}" if detected else f"{DIM}—{RST} None"
@@ -679,12 +790,12 @@ def phase_screenshots(domain,workspace,av):
     adir=workspace/domain/"active"; alivef=adir/"alive-final.txt"; prog=PhaseProgress("7 — Screenshots",2)
     if "aquatone" in av and alivef.exists():
         aq_dir=workspace/domain/"screenshots"/"aquatone"; mkd(aq_dir)
-        cmd=f"cat {alivef} | aquatone -out {aq_dir} -silent -threads 10 -http-timeout 5000 -screenshot-timeout 20000"; run_cmd(cmd,timeout=1800)
+        cmd=f"cat {alivef} | aquatone -out {aq_dir} -silent -threads 10 -http-timeout 5000 -screenshot-timeout 20000"; run_cmd(cmd,timeout=1800,tool_name="aquatone")
         prog.step(f"aquatone → {aq_dir}")
     else: prog.step("aquatone — skipped")
     if "gowitness" in av and alivef.exists():
         gw_dir=workspace/domain/"screenshots"/"gowitness"; mkd(gw_dir)
-        cmd=f"gowitness scan file -f {alivef} -q -t 10 --delay 1500 --timeout 15 --screenshot-path {gw_dir} --write-db"; run_cmd(cmd,timeout=1800)
+        cmd=f"gowitness scan file -f {alivef} -q -t 10 --delay 1500 --timeout 15 --screenshot-path {gw_dir} --write-db"; run_cmd(cmd,timeout=1800,tool_name="gowitness")
         prog.step(f"gowitness → {gw_dir}")
     else: prog.step("gowitness — skipped")
     prog.done_phase()
@@ -695,22 +806,30 @@ def phase_screenshots(domain,workspace,av):
 
 def phase_content_discovery(domain,workspace,av):
     adir=workspace/domain/"active"; alivef=adir/"alive-final.txt"; udir=workspace/domain/"urls"; mkd(udir); prog=PhaseProgress("8 — Content Discovery",5); url_files=[]
+    filter_pattern = r"\.(jpg|png|gif|css|js|svg|ico|woff|pdf|zip|tar|gz|map|woff2|ttf|eot|otf|webp|avif|mp[34]|webm|ogg|exe|dll|so)$"
     if "waybackurls" in av and alivef.exists():
-        uf=udir/"urls.txt"; cmd=f'cat {alivef} | waybackurls | grep -vE r"\\.(jpg|png|gif|css|js|svg|ico|woff|pdf)$" | sort -u | tee {uf}'; run_cmd(cmd,timeout=900); url_files.append(uf)
+        uf=udir/"urls.txt"; cmd=f'cat {alivef} | waybackurls | grep -vE r"{filter_pattern}" | sort -u | tee {uf}'
+        run_cmd(cmd,timeout=900,tool_name="waybackurls"); url_files.append(uf)
     prog.step("waybackurls")
     if "gau" in av and alivef.exists():
-        uf=udir/"2urls.txt"; cmd=f'cat {alivef} | gau --threads 2 --timeout 10 | grep -vE r"\\.(jpg|png|gif|css|js|svg|ico|woff|woff2|pdf|map)$" | sort -u | tee {uf}'; run_cmd(cmd,timeout=900); url_files.append(uf)
+        uf=udir/"2urls.txt"; cmd=f'cat {alivef} | gau --threads 2 --timeout 10 | grep -vE r"{filter_pattern}" | sort -u | tee {uf}'
+        run_cmd(cmd,timeout=900,tool_name="gau"); url_files.append(uf)
     prog.step("gau")
     if "katana" in av and alivef.exists():
-        uf=udir/"3urls.txt"; cmd=f'katana -list {alivef} -d 3 -jc -kf all -o {uf} -silent -c 5 -rl 20 -hrl 3 -rd 1 -timeout 10 -retry 1 -fs rdn -ef png,jpg,gif,css,svg,ico,woff,woff2,pdf,map -iqp'; run_cmd(cmd,timeout=1200); url_files.append(uf)
+        uf=udir/"3urls.txt"; cmd=f'katana -list {alivef} -d 3 -jc -kf all -o {uf} -silent -c 5 -rl 20 -hrl 3 -rd 1 -timeout 10 -retry 1 -fs rdn -ef png,jpg,gif,css,svg,ico,woff,woff2,pdf,map -iqp'
+        run_cmd(cmd,timeout=1200,tool_name="katana"); url_files.append(uf)
     prog.step("katana")
     if "waymore" in av and alivef.exists():
-        uf=udir/"4urls.txt"; cmd=f'waymore -i {alivef} -mode U -oU {uf} -p 2 -lr 300 -t 20 -r 1 -wrlr 5 -urlr 3 -fc "200,301,302" -ft "text/html,application/json,text/javascript" -ci d'; run_cmd(cmd,timeout=1200); url_files.append(uf)
+        uf=udir/"4urls.txt"; cmd=f'waymore -i {alivef} -mode U -oU {uf} -p 2 -lr 300 -t 20 -r 1 -wrlr 5 -urlr 3 -fc "200,301,302" -ft "text/html,application/json,text/javascript" -ci d'
+        run_cmd(cmd,timeout=1200,tool_name="waymore"); url_files.append(uf)
     prog.step("waymore")
-    final_urls=udir/"final-urls.txt"; run_cmd(f"cat {' '.join(str(f) for f in url_files)} 2>/dev/null | sort -u > {final_urls}"); prog.step("merge → final-urls.txt")
+    final_urls=udir/"final-urls.txt"
+    run_cmd(f"cat {' '.join(str(f) for f in url_files)} 2>/dev/null | sort -u > {final_urls}", tool_name="cat")
+    prog.step("merge → final-urls.txt")
     cleanup_source_files_after_merge([f for f in url_files if f.exists()],label="url-source")
+    if not final_urls.exists(): final_urls.touch()
     if not is_file_empty(final_urls): print(f"  {G}✔{RST} final-urls.txt — {C}{len(rlines(final_urls))} unique URLs{RST}")
-    else: print(f"  {R}[!] final-urls.txt is empty — no URLs discovered{RST}")
+    else: print(f"  {Y}[!] final-urls.txt is empty — no URLs discovered{RST}")
     prog.done_phase()
     if args_verbose_output: show_file_content(final_urls,"final-urls.txt - All Discovered URLs",max_lines=50)
     return {"final_urls":str(final_urls)}
@@ -718,9 +837,9 @@ def phase_content_discovery(domain,workspace,av):
 def phase_js_recon(domain,workspace,av):
     udir=workspace/domain/"urls"; jsdir=workspace/domain/"js"; mkd(jsdir); prog=PhaseProgress("9 — JS Recon & Secret Discovery",2); final_urls=udir/"final-urls.txt"
     js_file=jsdir/'jsfiles.txt'
-    if final_urls.exists():
+    if final_urls.exists() and not is_file_empty(final_urls):
         cmd=f'grep -iE r"\\\\.js([?&#]|$)" {final_urls} | grep -viE r"\\.(png|jpe?g|gif|svg|css|ico|woff2?|ttf|eot|otf|webp|avif|mp[34]|webm|ogg|pdf|zip|tar|gz|map)$" | grep -E r"^https?://[^[:space:]]+\\\\.js" | sed \'s/[?#].*$//\' | sort -u > {js_file}'
-        run_cmd(cmd,timeout=300)
+        run_cmd(cmd,timeout=300,tool_name="grep")
     js_count=len(rlines(js_file)) if js_file.exists() else 0
     if js_count>0: print(f"  {G}✔{RST} jsfiles.txt — {C}{js_count} JS files{RST}")
     else: print(f"  {Y}[!] No JS files found — skipping secret scans{RST}"); cleanup_empty_file(js_file,"js-list")
@@ -729,7 +848,7 @@ def phase_js_recon(domain,workspace,av):
     if "mantra" in av and js_file.exists() and js_count>0:
         mantra_out=jsdir/'mantra-raw.txt'
         cmd=f'mantra -s -ua \'Mozilla/5.0\' -t 10 -d {js_file} 2>/dev/null | grep -iE r"(api[_-]?key|secret|token|password|passwd|pwd|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer|credential|private[_-]?key|client[_-]?secret|jwt|session[_-]?id|csrf)" | grep -vE r"^[[:space:]]*$" | sort -u > {mantra_out}'
-        run_cmd(cmd,timeout=900)
+        run_cmd(cmd,timeout=900,tool_name="mantra")
         if not is_file_empty(mantra_out): shutil.copy2(mantra_out,secrets_file); print(f"  {G}✔{RST} secrets-found.txt — {C}{len(rlines(secrets_file))} potential secrets{RST}")
         else: cleanup_empty_file(secrets_file,'secrets'); print(f"  {Y}[!] No secrets discovered{RST}")
         cleanup_empty_file(mantra_out,'mantra-raw')
@@ -742,13 +861,13 @@ def phase_leakix(domain,workspace,av):
     leakix_ips_file,leakix_ips_err=ldir/'leakix-ips.txt',ldir/'leakix-errors.log'
     if key and "curl" in av and "jq" in av and ipsf.exists():
         script=f'while IFS= read -r ip; do [[ -z "$ip" || ! "$ip" =~ ^([0-9]{{1,3}}\\\\.){{3}}[0-9]{{1,3}}$ ]] && continue; response=$(curl -s --max-time 15 --retry 1 --user-agent "Mozilla/5.0" "https://leakix.net/host/$ip" -H "api-key: {key}" -H "Accept: application/json" 2>/dev/null); if echo "$response" | jq -e \'.error\' >/dev/null 2>&1; then error_msg=$(echo "$response" | jq -r \'.error // "Unknown error"\'); echo "[$(date +%H:%M:%S)] ⚠️ $ip: $error_msg" >&2; [[ "$error_msg" =~ [Rr]ate.*limit|[Ll]imit|429 ]] && sleep 10 || sleep 2; continue; else echo "$response" | jq -r --arg ip "$ip" r\'".Services[]? | select((.leak.type != null and .leak.type != "") or (.port | IN(21,22,3306,5432,6379,27017,9200,1433,1521,3389,5900))) | "\\($ip) | Port: \\(.port) | Proto: \\(.protocol) | Software: \\(.software.name // "N/A") | Leak: \\(.leak.type // "None") | Version: \\(.software.version // "N/A")"\' 2>/dev/null; fi; sleep 1; done < <(grep -oE r\'^([0-9]{{1,3}}\\\\.){{3}}[0-9]{{1,3}}$\' {ipsf} 2>/dev/null | sort -u) | sort -u > {leakix_ips_file} 2> {leakix_ips_err}'
-        run_cmd(script,timeout=1800)
+        run_cmd(script,timeout=1800,tool_name="leakix")
         if not is_file_empty(leakix_ips_file): print(f"  {G}✔{RST} leakix-ips.txt — {C}{len(rlines(leakix_ips_file))} findings{RST}")
     prog.step("LeakIX IP scan")
     leakix_doms_file,leakix_doms_err=ldir/'leakix-domains.txt',ldir/'leakix-domains-errors.log'
     if key and "curl" in av and "jq" in av and alivef.exists():
         script=f'cat "{alivef}" | sed "s|https\\?://||; s|/.*||" | grep -E r\'^[a-zA-Z0-9.-]+\\.[a-zA-Z]{{2,}}$\' | sort -u | while IFS= read -r dom; do [[ -z "$dom" || "$dom" =~ ^# ]] && continue; response=$(curl -s --max-time 15 --retry 1 --user-agent "Mozilla/5.0" "https://leakix.net/domain/$dom" -H "api-key: {key}" -H "Accept: application/json" 2>/dev/null); if echo "$response" | jq -e \'.error\' >/dev/null 2>&1; then error_msg=$(echo "$response" | jq -r \'.error // "Unknown error"\'); echo "[$(date +%H:%M:%S)] ⚠️ $dom: $error_msg" >&2; [[ "$error_msg" =~ [Rr]ate.*limit|[Ll]imit|429 ]] && sleep 15 || sleep 3; continue; else echo "$response" | jq -r --arg dom "$dom" r\'.Services[]? | select((.leak.type != null and .leak.type != "") or (.port | IN(21,22,23,25,53,80,110,139,143,389,443,445,993,995,1433,1521,3306,3389,5432,5900,6379,8080,8443,9200,27017))) | "\\($dom) | Port: \\(.port) | Proto: \\(.protocol) | Software: \\(.software.name // "N/A") | Version: \\(.software.version // "N/A") | Leak: \\(.leak.type // "None") | Details: \\(.leak.details // "N/A")"\' 2>/dev/null; fi; sleep 1; done | sort -u > {leakix_doms_file} 2> {leakix_doms_err}'
-        run_cmd(script,timeout=2400)
+        run_cmd(script,timeout=2400,tool_name="leakix")
         if not is_file_empty(leakix_doms_file): print(f"  {G}✔{RST} leakix-domains.txt — {C}{len(rlines(leakix_doms_file))} findings{RST}")
     prog.step("LeakIX domain scan")
     if not key: print(f"  {Y}[!] LEAKIX_API not set — phase skipped{RST}")
@@ -787,7 +906,7 @@ def write_pdf(path,result):
 
 def main():
     global api_keys_global,args_show_results,args_verbose_output,args_skip_active_subs,args_resume
-    global args_wordlist,args_resolvers,RESUME_FILE,GLOBAL_USE_PROXYCHAINS
+    global args_wordlist,args_resolvers,RESUME_FILE,GLOBAL_USE_PROXYCHAINS,GLOBAL_HYBRID_PROXY
     if sys.platform!="linux": print(f"{Y}[!] Clicker is designed for Linux.{RST}")
     parser=argparse.ArgumentParser(description=f"Clicker {VERSION} — Black-box Recon Pipeline | {INSTAGRAM}")
     parser.add_argument("-t","--target",help="Single target domain"); parser.add_argument("--targets-file",help="File with one domain per line")
@@ -801,6 +920,7 @@ def main():
     parser.add_argument("--auto-proxy", action="store_true", help="Fetch fresh proxies from public APIs automatically")
     parser.add_argument("--rotate-proxy", action="store_true", help="Rotate proxies per target")
     parser.add_argument("--proxychains", action="store_true", help="Route all tools via proxychains (requires proxychains4)")
+    parser.add_argument("--hybrid-proxy", action="store_true", help="Smart routing: Proxy ONLY for active scanning, Passive runs directly")
     parser.add_argument("--wordlist",default="/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt",help="Wordlist for active subdomain brute-force")
     parser.add_argument("--resolvers",default="/usr/share/seclists/Discovery/DNS/resolvers.txt",help="Resolvers file for DNS queries")
     parser.add_argument("--keep-sources",action="store_true",help="Keep source files after merge (debug mode)")
@@ -809,7 +929,17 @@ def main():
     args=parser.parse_args(); print(ASCII_LOGO)
     
     GLOBAL_USE_PROXYCHAINS = args.proxychains
+    GLOBAL_HYBRID_PROXY = args.hybrid_proxy
     pm = ProxyManager(proxy=args.proxy, proxy_file=args.proxy_list, auto_fetch=args.auto_proxy, rotate=args.rotate_proxy)
+    
+    if GLOBAL_HYBRID_PROXY and pm.proxies:
+        test_proxy = pm.get_current()
+        if test_proxy and not check_proxy_health(test_proxy, timeout=8):
+            print(f"{Y}[!] Initial proxy health check failed — will auto-bypass when needed{RST}")
+            GLOBAL_PROXY_HEALTH_OK = False
+        else:
+            GLOBAL_PROXY_HEALTH_OK = True
+    
     pm.apply()
     
     args_show_results,args_verbose_output=args.show_phase_results,args.verbose
@@ -818,7 +948,7 @@ def main():
     api_keys_global=collect_api_keys(Path(args.api_file)); targets=parse_targets(args.target,args.targets_file)
     workspace=Path(args.workspace); mkd(workspace)
     RESUME_FILE = workspace / ".clicker_resume.json"
-    required_tools=["subfinder","sublist3r","chaos","assetfinder","github-subdomains","findomain","waybackurls","gau","httpx","httpx-toolkit","naabu","dnsx","cdncheck","nmap","aquatone","gowitness","katana","waymore","mantra","subzy","subjack","wafw00f","puredns","altdns","shuffledns","dnsrecon","ffuf","curl","jq","grep","sed","awk","sort","cat"]
+    required_tools=["subfinder","chaos","assetfinder","github-subdomains","findomain","waybackurls","gau","httpx","httpx-toolkit","naabu","dnsx","cdncheck","nmap","aquatone","gowitness","katana","waymore","mantra","subzy","subjack","wafw00f","puredns","altdns","shuffledns","dnsrecon","ffuf","curl","jq","grep","sed","awk","sort","cat"]
     available=check_tools(required_tools); result={"generated_at":datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z'),"targets":[]}
     total_phases=11; print(f"\n{BOLD}{M}[►] Starting scan on {len(targets)} target(s) — {total_phases} phases each{RST}\n")
     
