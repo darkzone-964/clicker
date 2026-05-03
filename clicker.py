@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-import argparse, datetime, html, json, os, re, shutil, subprocess, sys, time
+import argparse, datetime, html, json, os, re, shutil, subprocess, sys, time, random, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
 R,G,Y,B,M,C,W,DIM,RST,BOLD = "\033[91m","\033[92m","\033[93m","\033[94m","\033[95m","\033[96m","\033[97m","\033[2m","\033[0m","\033[1m"
-AUTHOR,VERSION,INSTAGRAM = "Clicker Tool","v1.0","@403_linux"
+AUTHOR,VERSION,INSTAGRAM = "Clicker Tool","v1.2","@403_linux"
 
 ASCII_ART = r"""
 .__  .__        __                 
@@ -19,14 +19,79 @@ ASCII_LOGO = f"{C}{ASCII_ART}{RST}{DIM}Black-box Recon Pipeline | {BOLD}{C}{AUTH
 SENSITIVE_PREFIXES = ["app","dashboard","api","auth","admin","dev","staging","test","internal","vpn","mail","ftp","sandbox","uat","qa","jenkins","gitlab","payment","portal","secure","beta","demo","prod","mgmt","manage","login","sso","id","oauth","backup","old","legacy","corp","intranet","remote","access","cloud","db","database","secret","private","hidden"]
 PORTS_FULL = ",".join(["21","22","23","25","53","80","110","111","135","139","143","389","443","445","993","995","1433","1521","2181","2375","2376","3000","3001","3306","3389","4848","4999","5000","5432","5601","5900","5984","6379","6443","7001","7077","7474","8000","8080","8081","8082","8083","8085","8088","8089","8090","8091","8092","8095","8096","8097","8098","8099","8161","8443","8444","8500","8600","8686","8765","8800","8848","8880","8888","8983","9000","9001","9002","9090","9091","9092","9093","9094","9095","9096","9100","9200","9300","9418","9999","10000","10250","10255","11211","15672","16686","27017","28017","50000","50070","50090","61616"])
 
-args_show_results,args_verbose_output,args_skip_active_subs = False,False,False
+args_show_results,args_verbose_output,args_skip_active_subs,args_resume = False,False,False,False
 args_wordlist = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt"
 args_resolvers = "/usr/share/seclists/Discovery/DNS/resolvers.txt"
 api_keys_global = {}
+RESUME_FILE = None
+GLOBAL_USE_PROXYCHAINS = False
+
+class ProxyManager:
+    def __init__(self, proxy=None, proxy_file=None, auto_fetch=False, rotate=False):
+        self.proxies = []
+        self.current_idx = 0
+        self.rotate = rotate
+        self.load(proxy, proxy_file, auto_fetch)
+
+    def load(self, proxy, proxy_file, auto_fetch):
+        raw = []
+        if auto_fetch:
+            print(f"{C}[*] Fetching fresh proxies from public API...{RST}")
+            try:
+                urls = [
+                    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all",
+                    "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"
+                ]
+                for url in urls:
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=10) as res:
+                        raw.extend(res.read().decode().splitlines())
+                print(f"{G}[+] Fetched {len(raw)} raw proxies. Validating...{RST}")
+            except Exception as e:
+                print(f"{Y}[!] Proxy fetch failed: {e}{RST}")
+        
+        if proxy_file and os.path.isfile(proxy_file):
+            with open(proxy_file) as f: raw.extend(f.read().splitlines())
+        if proxy: raw.append(proxy)
+            
+        pattern = re.compile(r'^(?:[^@]+@)?(\d{1,3}\.){3}\d{1,3}:\d{2,5}$')
+        self.proxies = list(set([p.strip() for p in raw if pattern.match(p.strip())]))
+        if not self.proxies:
+            print(f"{Y}[!] No valid proxies loaded. Running without proxy.{RST}")
+        else:
+            print(f"{G}[+] Loaded {len(self.proxies)} valid proxy(ies).{RST}")
+
+    def apply(self, domain=None):
+        if not self.proxies:
+            for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']:
+                os.environ.pop(k, None)
+            return
+        if self.rotate:
+            proxy = self.proxies[self.current_idx]
+            self.current_idx = (self.current_idx + 1) % len(self.proxies)
+            if domain: print(f"{DIM}↻ Rotating proxy: {proxy} for {domain}{RST}")
+        else:
+            proxy = self.proxies[0]
+
+        proxy_url = proxy
+        if not any(proxy_url.startswith(p) for p in ["http://", "https://", "socks4://", "socks5://"]):
+            proxy_url = f"http://{proxy_url}"
+            
+        os.environ['HTTP_PROXY'] = proxy_url
+        os.environ['HTTPS_PROXY'] = proxy_url
+        os.environ['ALL_PROXY'] = proxy_url
+        os.environ['http_proxy'] = proxy_url
+        os.environ['https_proxy'] = proxy_url
+        os.environ['all_proxy'] = proxy_url
 
 def run_cmd(cmd,timeout=600):
+    final_cmd = cmd
+    if GLOBAL_USE_PROXYCHAINS:
+        pc_bin = shutil.which("proxychains4") or shutil.which("proxychains")
+        if pc_bin:
+            final_cmd = f"{pc_bin} -q {cmd}"
     try:
-        p = subprocess.run(cmd,shell=True,check=False,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=timeout)
+        p = subprocess.run(final_cmd,shell=True,check=False,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=timeout)
         return p.returncode,p.stdout.strip(),p.stderr.strip()
     except subprocess.TimeoutExpired: return 124,"",f"timeout after {timeout}s"
 
@@ -97,6 +162,19 @@ class PhaseProgress:
         print(f"  {G}{'█'*bar}{RST}{DIM}{'░'*(25-bar)}{RST} {BOLD}{pct:3d}%{RST} {Y}[{self.done}/{self.total}]{RST} {DIM}elapsed {elapsed:.0f}s{RST} {W}{label}{RST}")
     def done_phase(self): print(f"\n  {G}✔ Phase complete in {time.time()-self.start:.1f}s{RST}\n")
 
+def save_checkpoint(phase_name):
+    global RESUME_FILE
+    if RESUME_FILE:
+        data = {"last_phase": phase_name, "timestamp": datetime.datetime.now().isoformat()}
+        RESUME_FILE.write_text(json.dumps(data), encoding="utf-8")
+
+def load_checkpoint():
+    global RESUME_FILE
+    if RESUME_FILE and RESUME_FILE.exists():
+        try: return json.loads(RESUME_FILE.read_text())
+        except: pass
+    return {}
+
 def read_env_file(path):
     vals={}
     if not path.exists(): return vals
@@ -146,6 +224,45 @@ def parse_targets(single,tfile):
     targets=sorted(set(targets))
     if not targets: sys.exit(f"{R}[!] No targets. Use -t or --targets-file{RST}")
     return targets
+
+def find_file_smart(filename, search_names=None):
+    if search_names is None: search_names = [filename]
+    found_files = []
+    for name in search_names:
+        _, out, _ = run_cmd(f"locate -i '{name}' 2>/dev/null | head -20", timeout=30)
+        if out:
+            for line in out.splitlines():
+                path = line.strip()
+                if path and os.path.isfile(path): found_files.append(path)
+    common_paths = ["/usr/share/seclists/Discovery/DNS/","/usr/share/wordlists/","/opt/wordlists/",os.path.expanduser("~/wordlists/"),"./wordlists/","/root/wordlists/"]
+    for cp in common_paths:
+        if os.path.isdir(cp):
+            for name in search_names:
+                candidate = os.path.join(cp, name)
+                if os.path.isfile(candidate) and candidate not in found_files: found_files.append(candidate)
+    return list(set(found_files))
+
+def ask_user_for_file(filename, found_files):
+    if not found_files:
+        print(f"  {Y}[!] {filename} not found in system{RST}")
+        user_path = input(f"  {DIM}Enter custom path for {filename} (or press Enter to skip): {RST}").strip()
+        if user_path and os.path.isfile(user_path): print(f"  {G}✔{RST} Using: {user_path}"); return user_path
+        return None
+    print(f"\n  {Y}[?] Found {len(found_files)} possible {filename} file(s):{RST}")
+    for i, f in enumerate(found_files[:5], 1): print(f"    {i}. {DIM}{f}{RST}")
+    if len(found_files) > 5: print(f"    {DIM}... and {len(found_files)-5} more{RST}")
+    while True:
+        choice = input(f"  {DIM}Use one of these? Enter number (1-{min(5,len(found_files))}), 'n' for custom path, or Enter to skip: {RST}").strip()
+        if choice == "" or choice.lower() == "skip": return None
+        elif choice.lower() == "n":
+            user_path = input(f"  {DIM}Enter custom path for {filename}: {RST}").strip()
+            if user_path and os.path.isfile(user_path): print(f"  {G}✔{RST} Using: {user_path}"); return user_path
+            print(f"  {R}[!] Invalid path{RST}")
+        elif choice.isdigit() and 1 <= int(choice) <= min(5, len(found_files)):
+            selected = found_files[int(choice)-1]
+            confirm = input(f"  {DIM}Use {selected}? (Y/n): {RST}").strip().lower()
+            if confirm == "" or confirm == "y": print(f"  {G}✔{RST} Using: {selected}"); return selected
+        else: print(f"  {R}[!] Invalid choice{RST}")
 
 def phase_passive(domain,workspace,api_keys,av):
     pdir=workspace/domain/"passive"; mkd(pdir); collected=set(); logs=[]
@@ -242,12 +359,23 @@ def phase_active_subs(domain,workspace,passive,av):
     if args_skip_active_subs: print(f"  {Y}[!] Skipping active subdomain enumeration (--skip-active-subs){RST}"); return {"active_subs":[],"active_file":None}
     pdir=workspace/domain/"passive"; adir=workspace/domain/"active"; mkd(adir)
     passive_subs_file=pdir/"allsubs.txt"; passive_subs=rlines(passive_subs_file) if passive_subs_file.exists() else []
-    wordlist,resolvers=Path(args_wordlist),Path(args_resolvers)
-    if not wordlist.exists() or not resolvers.exists(): print(f"  {R}[!] Wordlist or resolvers not found{RST}"); return {"active_subs":[],"active_file":None}
+    wordlist_path = Path(args_wordlist); resolvers_path = Path(args_resolvers)
+    if not wordlist_path.exists():
+        print(f"  {Y}[!] Wordlist not found: {wordlist_path}{RST}")
+        found = find_file_smart("wordlist", ["subdomains-top1million-20000.txt","subdomains-top1million-5000.txt","subdomains.txt","wordlist.txt","dns-bruteforce.txt","namelist.txt"])
+        chosen = ask_user_for_file("wordlist", found)
+        if chosen: wordlist_path = Path(chosen)
+        else: print(f"  {Y}[!] Skipping active subdomain enumeration — no wordlist{RST}"); return {"active_subs":[], "active_file":None}
+    if not resolvers_path.exists():
+        print(f"  {Y}[!] Resolvers file not found: {resolvers_path}{RST}")
+        found = find_file_smart("resolvers", ["resolvers.txt","resolvers","dns-resolvers.txt","nameservers.txt","dns.txt"])
+        chosen = ask_user_for_file("resolvers", found)
+        if chosen: resolvers_path = Path(chosen)
+        else: print(f"  {Y}[!] Skipping active subdomain enumeration — no resolvers{RST}"); return {"active_subs":[], "active_file":None}
     prog=PhaseProgress("1.5 — Active Subdomain Enumeration",5); active_subs=set(); temp_files=[]
     if "puredns" in av:
         puredns_out=adir/"puredns_output.txt"
-        cmd=f'puredns bruteforce {wordlist} {domain} --resolvers {resolvers} --rate-limit 150 --rate-limit-trusted 100 --threads 20 --wildcard-tests 5 --wildcard-batch 100 --write {puredns_out} --quiet'
+        cmd=f'puredns bruteforce {wordlist_path} {domain} --resolvers {resolvers_path} --rate-limit 150 --rate-limit-trusted 100 --threads 20 --wildcard-tests 5 --wildcard-batch 100 --write {puredns_out} --quiet'
         run_cmd(cmd,timeout=1800)
         if puredns_out.exists():
             parsed={clean_sub(l,domain) for l in rlines(puredns_out)}; parsed={x for x in parsed if x}
@@ -256,10 +384,10 @@ def phase_active_subs(domain,workspace,passive,av):
     else: prog.step("puredns — skipped")
     if "altdns" in av and "shuffledns" in av and passive_subs:
         permuted,shuffled,shuffledns_out=adir/"permuted_subs.txt",adir/"shuffled_subs.txt",adir/"shuffledns_output.txt"
-        cmd=f'altdns -i {passive_subs_file} -o {permuted} -w {wordlist} -n -r -d 1.1.1.1 -t 40 -s {shuffled}'
+        cmd=f'altdns -i {passive_subs_file} -o {permuted} -w {wordlist_path} -n -r -d 1.1.1.1 -t 40 -s {shuffled}'
         run_cmd(cmd,timeout=600)
         if shuffled.exists() and rlines(shuffled):
-            cmd=f'shuffledns -d {domain} -list {shuffled} -r {resolvers} -o {shuffledns_out} -silent -t 50 -retries 2 -strict-wildcard -batch-size 10000'
+            cmd=f'shuffledns -d {domain} -list {shuffled} -r {resolvers_path} -o {shuffledns_out} -silent -t 50 -retries 2 -strict-wildcard -batch-size 10000'
             run_cmd(cmd,timeout=1800)
             if shuffledns_out.exists():
                 parsed={clean_sub(l,domain) for l in rlines(shuffledns_out)}; parsed={x for x in parsed if x}
@@ -268,7 +396,7 @@ def phase_active_subs(domain,workspace,passive,av):
     else: prog.step("altdns+shuffledns — skipped")
     if "dnsrecon" in av:
         dnsrecon_csv=adir/f"{domain}_dnsrecon.csv"
-        cmd=f'dnsrecon -d {domain} -t brt -D {wordlist} -n 8.8.8.8,1.1.1.1,9.9.9.9 -f -s -a --threads 20 --lifetime 5 -c {dnsrecon_csv} -x {adir}/{domain}_dnsrecon.xml'
+        cmd=f'dnsrecon -d {domain} -t brt -D {wordlist_path} -n 8.8.8.8,1.1.1.1,9.9.9.9 -f -s -a --threads 20 --lifetime 5 -c {dnsrecon_csv} -x {adir}/{domain}_dnsrecon.xml'
         run_cmd(cmd,timeout=1800)
         if dnsrecon_csv.exists():
             with open(dnsrecon_csv) as f:
@@ -283,7 +411,7 @@ def phase_active_subs(domain,workspace,passive,av):
     else: prog.step("dnsrecon — skipped")
     if "ffuf" in av:
         ffuf_json=adir/"ffuf_subs.json"
-        cmd=f'ffuf -u https://FUZZ.{domain} -w {wordlist} -mc 200,301,302,403,404 -t 20 -rate 30 -timeout 10 -ac -se -of json -o {ffuf_json} -H "User-Agent: Mozilla/5.0" -s'
+        cmd=f'ffuf -u https://FUZZ.{domain} -w {wordlist_path} -mc 200,301,302,403,404 -t 20 -rate 30 -timeout 10 -ac -se -of json -o {ffuf_json} -H "User-Agent: Mozilla/5.0" -s'
         run_cmd(cmd,timeout=1800)
         if ffuf_json.exists():
             try:
@@ -476,8 +604,79 @@ def phase_ports(domain,workspace,av):
         if nmap_results.exists() and not is_file_empty(nmap_results): show_file_content(nmap_results,"nmap-scripts.txt - Potential Vulnerabilities",max_lines=30)
     return {"open_ports_file":str(open_ports_txt) if open_ports_txt.exists() else None}
 
+def phase_takeover(domain,workspace,av):
+    adir=workspace/domain/"active"; tdir=workspace/domain/"takeover"; mkd(tdir); f404=adir/"404subs.txt"; prog=PhaseProgress("5 — Subdomain Takeover Detection",3)
+    if "subzy" in av and f404.exists() and not is_file_empty(f404):
+        subzy_out=tdir/'subzy-results.txt'; cmd=f'subzy run --targets {f404} --concurrency 5 --timeout 8 --hide_fails --vuln | tee {subzy_out}'; run_cmd(cmd,timeout=600); cleanup_empty_file(subzy_out,'subzy')
+    prog.step("subzy takeover check")
+    if "subjack" in av and f404.exists() and not is_file_empty(f404):
+        subjack_out=tdir/'subjack-results.json'; cmd=f'subjack -w {f404} -t 8 -timeout 10 -ssl -o {subjack_out}'; run_cmd(cmd,timeout=600); cleanup_empty_file(subjack_out,'subjack')
+    prog.step("subjack takeover check")
+    if "nuclei" in av and f404.exists() and not is_file_empty(f404):
+        nuclei_out=tdir/'nuclei-takeover.txt'; tpl=Path("takeover.yaml")
+        if tpl.exists(): base_cmd=f"nuclei -list {f404} -t {tpl} -silent"
+        else: base_cmd=f"nuclei -list {f404} -tags takeover -silent"
+        cmd=f'{base_cmd} -rl 10 -c 5 -timeout 8 -retries 1 -fr -no-interactsh -nmhe -headless-concurrency 1 -headless-bulk-size 1 | tee {nuclei_out}'
+        run_cmd(cmd,timeout=1200); cleanup_empty_file(nuclei_out,'nuclei-takeover')
+    prog.step("nuclei takeover template"); prog.done_phase()
+    if args_verbose_output:
+        for fname in ['subzy-results.txt','subjack-results.json','nuclei-takeover.txt']:
+            fpath=tdir/fname
+            if fpath.exists() and not is_file_empty(fpath): show_file_content(fpath,f"{fname} - Takeover Findings",max_lines=20)
+    return {"takeover_dir":str(tdir)}
+
+def phase_waf(domain,workspace,av):
+    adir=workspace/domain/"active"; alivef=adir/"alive-final.txt"; wdir=workspace/domain/"waf"; mkd(wdir); prog=PhaseProgress("6 — WAF Detection",1)
+    waf_json,waf_simple=wdir/'waf-report.json',wdir/'waf-detected.txt'
+    if "wafw00f" in av and alivef.exists() and not is_file_empty(alivef):
+        batch_prefix=str(wdir/"batch_")
+        cmd=f'split -l 50 {alivef} "{batch_prefix}" && for f in "{batch_prefix}"*; do wafw00f -i "$f" -a -T 10 --format json --no-colors; sleep 30; done >> "{waf_json}" && rm -f "{batch_prefix}"*'
+        run_cmd(cmd,timeout=3600)
+        if waf_json.exists() and not is_file_empty(waf_json):
+            try:
+                content=waf_json.read_text(encoding="utf-8"); all_results=[]; decoder=json.JSONDecoder(); idx=0
+                while idx<len(content):
+                    while idx<len(content) and content[idx] in ' \t\n\r': idx+=1
+                    if idx>=len(content): break
+                    try:
+                        obj,idx=decoder.raw_decode(content,idx=idx)
+                        if isinstance(obj,list): all_results.extend(obj)
+                        elif isinstance(obj,dict): all_results.append(obj)
+                    except: break
+                waf_json.write_text(json.dumps(all_results),encoding="utf-8")
+            except: pass
+            
+        # ✅ FIX: Defined the function outside the condition to avoid scope issues and fixed syntax
+        def parse_waf_simple_inner(json_file, output_file):
+            if not json_file.exists() or is_file_empty(json_file): return False
+            results=[]
+            try:
+                with open(json_file,'r') as f:
+                    data=json.load(f)
+                    if isinstance(data,list):
+                        seen=set()
+                        # ✅ FIX: Added 'data' explicitly
+                        for entry in data:
+                            url=entry.get('url',''); detected=entry.get('detected',False); waf_name=entry.get('firewall','None') if detected else 'None'
+                            if url and url not in seen:
+                                seen.add(url); status=f"{G}✓{RST} {waf_name}" if detected else f"{DIM}—{RST} None"
+                                results.append(f"{url:50} | {status}")
+                if results:
+                    header=f"{'URL':50} | WAF Detected\n{'-'*70}"; wlines(output_file,[header]+results,auto_cleanup=False); return True
+            except: pass
+            return False
+
+        if parse_waf_simple_inner(waf_json,waf_simple):
+            print(f"  {G}✔{RST} WAF results → {waf_simple.name}"); detected=sum(1 for l in rlines(waf_simple) if '✓' in l)
+            print(f"  {G}✔{RST} WAFs detected: {C}{detected}{RST} hosts")
+        prog.step(f"wafw00f → {waf_simple.name}")
+    else: prog.step("wafw00f — skipped")
+    cleanup_empty_file(waf_json,'waf-raw-json'); cleanup_empty_file(waf_simple,'waf-simple'); prog.done_phase()
+    if args_verbose_output and waf_simple.exists() and not is_file_empty(waf_simple): show_file_content(waf_simple,"waf-detected.txt - WAF Detection Results",max_lines=30)
+    return {"waf_file":str(waf_simple) if waf_simple.exists() else None}
+
 def phase_screenshots(domain,workspace,av):
-    adir=workspace/domain/"active"; alivef=adir/"alive-final.txt"; prog=PhaseProgress("5 — Screenshots",2)
+    adir=workspace/domain/"active"; alivef=adir/"alive-final.txt"; prog=PhaseProgress("7 — Screenshots",2)
     if "aquatone" in av and alivef.exists():
         aq_dir=workspace/domain/"screenshots"/"aquatone"; mkd(aq_dir)
         cmd=f"cat {alivef} | aquatone -out {aq_dir} -silent -threads 10 -http-timeout 5000 -screenshot-timeout 20000"; run_cmd(cmd,timeout=1800)
@@ -495,7 +694,7 @@ def phase_screenshots(domain,workspace,av):
         if gw_db.exists(): print(f"{BOLD}{C}📸 Gowitness database:{RST} {DIM}{gw_db}{RST}")
 
 def phase_content_discovery(domain,workspace,av):
-    adir=workspace/domain/"active"; alivef=adir/"alive-final.txt"; udir=workspace/domain/"urls"; mkd(udir); prog=PhaseProgress("6 — Content Discovery",5); url_files=[]
+    adir=workspace/domain/"active"; alivef=adir/"alive-final.txt"; udir=workspace/domain/"urls"; mkd(udir); prog=PhaseProgress("8 — Content Discovery",5); url_files=[]
     if "waybackurls" in av and alivef.exists():
         uf=udir/"urls.txt"; cmd=f'cat {alivef} | waybackurls | grep -vE r"\\.(jpg|png|gif|css|js|svg|ico|woff|pdf)$" | sort -u | tee {uf}'; run_cmd(cmd,timeout=900); url_files.append(uf)
     prog.step("waybackurls")
@@ -516,36 +715,8 @@ def phase_content_discovery(domain,workspace,av):
     if args_verbose_output: show_file_content(final_urls,"final-urls.txt - All Discovered URLs",max_lines=50)
     return {"final_urls":str(final_urls)}
 
-def has_real_leakix_findings(file_path):
-    if not file_path.exists() or is_file_empty(file_path): return False
-    content=file_path.read_text(encoding="utf-8")
-    if re.search(r'"leak"\s*:\s*\{',content) or re.search(r'"Services"\s*:\s*\[',content): return True
-    if re.search(r'"port"\s*:\s*\d+',content) and re.search(r'"software"',content): return True
-    return False
-
-def phase_leakix(domain,workspace,av):
-    adir=workspace/domain/"active"; ldir=workspace/domain/"leakix"; mkd(ldir); ipsf=adir/"ips.txt"; alivef=adir/"alive-final.txt"; prog=PhaseProgress("7 — LeakIX Exposure Check",2); key=api_keys_global.get("LEAKIX_API","")
-    leakix_ips_file,leakix_ips_err=ldir/'leakix-ips.txt',ldir/'leakix-errors.log'
-    if key and "curl" in av and "jq" in av and ipsf.exists():
-        script=f'while IFS= read -r ip; do [[ -z "$ip" || ! "$ip" =~ ^([0-9]{{1,3}}\\\\.){{3}}[0-9]{{1,3}}$ ]] && continue; response=$(curl -s --max-time 15 --retry 1 --user-agent "Mozilla/5.0" "https://leakix.net/host/$ip" -H "api-key: {key}" -H "Accept: application/json" 2>/dev/null); if echo "$response" | jq -e \'.error\' >/dev/null 2>&1; then error_msg=$(echo "$response" | jq -r \'.error // "Unknown error"\'); echo "[$(date +%H:%M:%S)] ⚠️ $ip: $error_msg" >&2; [[ "$error_msg" =~ [Rr]ate.*limit|[Ll]imit|429 ]] && sleep 10 || sleep 2; continue; else echo "$response" | jq -r --arg ip "$ip" r\'".Services[]? | select((.leak.type != null and .leak.type != "") or (.port | IN(21,22,3306,5432,6379,27017,9200,1433,1521,3389,5900))) | "\\($ip) | Port: \\(.port) | Proto: \\(.protocol) | Software: \\(.software.name // "N/A") | Leak: \\(.leak.type // "None") | Version: \\(.software.version // "N/A")"\' 2>/dev/null; fi; sleep 1; done < <(grep -oE r\'^([0-9]{{1,3}}\\\\.){{3}}[0-9]{{1,3}}$\' {ipsf} 2>/dev/null | sort -u) | sort -u > {leakix_ips_file} 2> {leakix_ips_err}'
-        run_cmd(script,timeout=1800)
-        if not has_real_leakix_findings(leakix_ips_file): cleanup_empty_file(leakix_ips_file,'leakix-ips'); print(f"  {Y}[!] leakix-ips.txt — no real findings, deleted{RST}")
-    prog.step("LeakIX IP scan")
-    leakix_doms_file,leakix_doms_err=ldir/'leakix-domains.txt',ldir/'leakix-domains-errors.log'
-    if key and "curl" in av and "jq" in av and alivef.exists():
-        script=f'cat "{alivef}" | sed "s|https\\?://||; s|/.*||" | grep -E r\'^[a-zA-Z0-9.-]+\\.[a-zA-Z]{{2,}}$\' | sort -u | while IFS= read -r dom; do [[ -z "$dom" || "$dom" =~ ^# ]] && continue; response=$(curl -s --max-time 15 --retry 1 --user-agent "Mozilla/5.0" "https://leakix.net/domain/$dom" -H "api-key: {key}" -H "Accept: application/json" 2>/dev/null); if echo "$response" | jq -e \'.error\' >/dev/null 2>&1; then error_msg=$(echo "$response" | jq -r \'.error // "Unknown error"\'); echo "[$(date +%H:%M:%S)] ⚠️ $dom: $error_msg" >&2; [[ "$error_msg" =~ [Rr]ate.*limit|[Ll]imit|429 ]] && sleep 15 || sleep 3; continue; else echo "$response" | jq -r --arg dom "$dom" r\'.Services[]? | select((.leak.type != null and .leak.type != "") or (.port | IN(21,22,23,25,53,80,110,139,143,389,443,445,993,995,1433,1521,3306,3389,5432,5900,6379,8080,8443,9200,27017))) | "\\($dom) | Port: \\(.port) | Proto: \\(.protocol) | Software: \\(.software.name // "N/A") | Version: \\(.software.version // "N/A") | Leak: \\(.leak.type // "None") | Details: \\(.leak.details // "N/A")"\' 2>/dev/null; fi; sleep 1; done | sort -u > {leakix_doms_file} 2> {leakix_doms_err}'
-        run_cmd(script,timeout=2400)
-        if not has_real_leakix_findings(leakix_doms_file): cleanup_empty_file(leakix_doms_file,'leakix-domains'); print(f"  {Y}[!] leakix-domains.txt — no real findings, deleted{RST}")
-    prog.step("LeakIX domain scan")
-    if not key: print(f"  {Y}[!] LEAKIX_API not set — phase skipped{RST}")
-    prog.done_phase()
-    if args_verbose_output:
-        if leakix_ips_file.exists() and not is_file_empty(leakix_ips_file): show_file_content(leakix_ips_file,"leakix-ips.txt - IP Exposure Findings",max_lines=30)
-        if leakix_doms_file.exists() and not is_file_empty(leakix_doms_file): show_file_content(leakix_doms_file,"leakix-domains.txt - Domain Exposure Findings",max_lines=30)
-    return {"leakix_ips":str(leakix_ips_file),"leakix_domains":str(leakix_doms_file)}
-
 def phase_js_recon(domain,workspace,av):
-    udir=workspace/domain/"urls"; jsdir=workspace/domain/"js"; mkd(jsdir); prog=PhaseProgress("8 — JS Recon & Secret Discovery",2); final_urls=udir/"final-urls.txt"
+    udir=workspace/domain/"urls"; jsdir=workspace/domain/"js"; mkd(jsdir); prog=PhaseProgress("9 — JS Recon & Secret Discovery",2); final_urls=udir/"final-urls.txt"
     js_file=jsdir/'jsfiles.txt'
     if final_urls.exists():
         cmd=f'grep -iE r"\\\\.js([?&#]|$)" {final_urls} | grep -viE r"\\.(png|jpe?g|gif|svg|css|ico|woff2?|ttf|eot|otf|webp|avif|mp[34]|webm|ogg|pdf|zip|tar|gz|map)$" | grep -E r"^https?://[^[:space:]]+\\\\.js" | sed \'s/[?#].*$//\' | sort -u > {js_file}'
@@ -566,73 +737,26 @@ def phase_js_recon(domain,workspace,av):
     if args_verbose_output and secrets_file.exists() and not is_file_empty(secrets_file): show_file_content(secrets_file,"secrets-found.txt - Potential API Keys/Secrets",max_lines=30)
     return {"js_file":str(js_file),"secrets_file":str(secrets_file)}
 
-def phase_takeover(domain,workspace,av):
-    adir=workspace/domain/"active"; tdir=workspace/domain/"takeover"; mkd(tdir); f404=adir/"404subs.txt"; prog=PhaseProgress("9 — Subdomain Takeover Detection",3)
-    if "subzy" in av and f404.exists() and not is_file_empty(f404):
-        subzy_out=tdir/'subzy-results.txt'; cmd=f'subzy run --targets {f404} --concurrency 5 --timeout 8 --hide_fails --vuln | tee {subzy_out}'; run_cmd(cmd,timeout=600); cleanup_empty_file(subzy_out,'subzy')
-    prog.step("subzy takeover check")
-    if "subjack" in av and f404.exists() and not is_file_empty(f404):
-        subjack_out=tdir/'subjack-results.json'; cmd=f'subjack -w {f404} -t 8 -timeout 10 -ssl -o {subjack_out}'; run_cmd(cmd,timeout=600); cleanup_empty_file(subjack_out,'subjack')
-    prog.step("subjack takeover check")
-    if "nuclei" in av and f404.exists() and not is_file_empty(f404):
-        nuclei_out=tdir/'nuclei-takeover.txt'; tpl=Path("takeover.yaml")
-        if tpl.exists(): base_cmd=f"nuclei -list {f404} -t {tpl} -silent"
-        else: base_cmd=f"nuclei -list {f404} -tags takeover -silent"
-        cmd=f'{base_cmd} -rl 10 -c 5 -timeout 8 -retries 1 -fr -no-interactsh -nmhe -headless-concurrency 1 -headless-bulk-size 1 | tee {nuclei_out}'
-        run_cmd(cmd,timeout=1200); cleanup_empty_file(nuclei_out,'nuclei-takeover')
-    prog.step("nuclei takeover template"); prog.done_phase()
+def phase_leakix(domain,workspace,av):
+    adir=workspace/domain/"active"; ldir=workspace/domain/"leakix"; mkd(ldir); ipsf=adir/"ips.txt"; alivef=adir/"alive-final.txt"; prog=PhaseProgress("10 — LeakIX Exposure Check",2); key=api_keys_global.get("LEAKIX_API","")
+    leakix_ips_file,leakix_ips_err=ldir/'leakix-ips.txt',ldir/'leakix-errors.log'
+    if key and "curl" in av and "jq" in av and ipsf.exists():
+        script=f'while IFS= read -r ip; do [[ -z "$ip" || ! "$ip" =~ ^([0-9]{{1,3}}\\\\.){{3}}[0-9]{{1,3}}$ ]] && continue; response=$(curl -s --max-time 15 --retry 1 --user-agent "Mozilla/5.0" "https://leakix.net/host/$ip" -H "api-key: {key}" -H "Accept: application/json" 2>/dev/null); if echo "$response" | jq -e \'.error\' >/dev/null 2>&1; then error_msg=$(echo "$response" | jq -r \'.error // "Unknown error"\'); echo "[$(date +%H:%M:%S)] ⚠️ $ip: $error_msg" >&2; [[ "$error_msg" =~ [Rr]ate.*limit|[Ll]imit|429 ]] && sleep 10 || sleep 2; continue; else echo "$response" | jq -r --arg ip "$ip" r\'".Services[]? | select((.leak.type != null and .leak.type != "") or (.port | IN(21,22,3306,5432,6379,27017,9200,1433,1521,3389,5900))) | "\\($ip) | Port: \\(.port) | Proto: \\(.protocol) | Software: \\(.software.name // "N/A") | Leak: \\(.leak.type // "None") | Version: \\(.software.version // "N/A")"\' 2>/dev/null; fi; sleep 1; done < <(grep -oE r\'^([0-9]{{1,3}}\\\\.){{3}}[0-9]{{1,3}}$\' {ipsf} 2>/dev/null | sort -u) | sort -u > {leakix_ips_file} 2> {leakix_ips_err}'
+        run_cmd(script,timeout=1800)
+        if not is_file_empty(leakix_ips_file): print(f"  {G}✔{RST} leakix-ips.txt — {C}{len(rlines(leakix_ips_file))} findings{RST}")
+    prog.step("LeakIX IP scan")
+    leakix_doms_file,leakix_doms_err=ldir/'leakix-domains.txt',ldir/'leakix-domains-errors.log'
+    if key and "curl" in av and "jq" in av and alivef.exists():
+        script=f'cat "{alivef}" | sed "s|https\\?://||; s|/.*||" | grep -E r\'^[a-zA-Z0-9.-]+\\.[a-zA-Z]{{2,}}$\' | sort -u | while IFS= read -r dom; do [[ -z "$dom" || "$dom" =~ ^# ]] && continue; response=$(curl -s --max-time 15 --retry 1 --user-agent "Mozilla/5.0" "https://leakix.net/domain/$dom" -H "api-key: {key}" -H "Accept: application/json" 2>/dev/null); if echo "$response" | jq -e \'.error\' >/dev/null 2>&1; then error_msg=$(echo "$response" | jq -r \'.error // "Unknown error"\'); echo "[$(date +%H:%M:%S)] ⚠️ $dom: $error_msg" >&2; [[ "$error_msg" =~ [Rr]ate.*limit|[Ll]imit|429 ]] && sleep 15 || sleep 3; continue; else echo "$response" | jq -r --arg dom "$dom" r\'.Services[]? | select((.leak.type != null and .leak.type != "") or (.port | IN(21,22,23,25,53,80,110,139,143,389,443,445,993,995,1433,1521,3306,3389,5432,5900,6379,8080,8443,9200,27017))) | "\\($dom) | Port: \\(.port) | Proto: \\(.protocol) | Software: \\(.software.name // "N/A") | Version: \\(.software.version // "N/A") | Leak: \\(.leak.type // "None") | Details: \\(.leak.details // "N/A")"\' 2>/dev/null; fi; sleep 1; done | sort -u > {leakix_doms_file} 2> {leakix_doms_err}'
+        run_cmd(script,timeout=2400)
+        if not is_file_empty(leakix_doms_file): print(f"  {G}✔{RST} leakix-domains.txt — {C}{len(rlines(leakix_doms_file))} findings{RST}")
+    prog.step("LeakIX domain scan")
+    if not key: print(f"  {Y}[!] LEAKIX_API not set — phase skipped{RST}")
+    prog.done_phase()
     if args_verbose_output:
-        for fname in ['subzy-results.txt','subjack-results.json','nuclei-takeover.txt']:
-            fpath=tdir/fname
-            if fpath.exists() and not is_file_empty(fpath): show_file_content(fpath,f"{fname} - Takeover Findings",max_lines=20)
-    return {"takeover_dir":str(tdir)}
-
-def parse_waf_simple(json_file,output_file):
-    if not json_file.exists() or is_file_empty(json_file): return False
-    results=[]
-    try:
-        with open(json_file,'r') as f:
-            data=json.load(f)
-            if isinstance(data,list):
-                seen=set()
-                for entry in data:
-                    url=entry.get('url',''); detected=entry.get('detected',False); waf_name=entry.get('firewall','None') if detected else 'None'
-                    if url and url not in seen:
-                        seen.add(url); status=f"{G}✓{RST} {waf_name}" if detected else f"{DIM}—{RST} None"
-                        results.append(f"{url:50} | {status}")
-        if results:
-            header=f"{'URL':50} | WAF Detected\n{'-'*70}"; wlines(output_file,[header]+results,auto_cleanup=False); return True
-    except: pass
-    return False
-
-def phase_waf(domain,workspace,av):
-    adir=workspace/domain/"active"; alivef=adir/"alive-final.txt"; wdir=workspace/domain/"waf"; mkd(wdir); prog=PhaseProgress("10 — WAF Detection",1)
-    waf_json,waf_simple=wdir/'waf-report.json',wdir/'waf-detected.txt'
-    if "wafw00f" in av and alivef.exists() and not is_file_empty(alivef):
-        batch_prefix=str(wdir/"batch_")
-        cmd=f'split -l 50 {alivef} "{batch_prefix}" && for f in "{batch_prefix}"*; do wafw00f -i "$f" -a -T 10 --format json --no-colors; sleep 30; done >> "{waf_json}" && rm -f "{batch_prefix}"*'
-        run_cmd(cmd,timeout=3600)
-        if waf_json.exists() and not is_file_empty(waf_json):
-            try:
-                content=waf_json.read_text(encoding="utf-8"); all_results=[]; decoder=json.JSONDecoder(); idx=0
-                while idx<len(content):
-                    while idx<len(content) and content[idx] in ' \t\n\r': idx+=1
-                    if idx>=len(content): break
-                    try:
-                        obj,idx=decoder.raw_decode(content,idx=idx)
-                        if isinstance(obj,list): all_results.extend(obj)
-                        elif isinstance(obj,dict): all_results.append(obj)
-                    except: break
-                waf_json.write_text(json.dumps(all_results),encoding="utf-8")
-            except: pass
-        if parse_waf_simple(waf_json,waf_simple):
-            print(f"  {G}✔{RST} WAF results → {waf_simple.name}"); detected=sum(1 for l in rlines(waf_simple) if '✓' in l)
-            print(f"  {G}✔{RST} WAFs detected: {C}{detected}{RST} hosts")
-        prog.step(f"wafw00f → {waf_simple.name}")
-    else: prog.step("wafw00f — skipped")
-    cleanup_empty_file(waf_json,'waf-raw-json'); cleanup_empty_file(waf_simple,'waf-simple'); prog.done_phase()
-    if args_verbose_output and waf_simple.exists() and not is_file_empty(waf_simple): show_file_content(waf_simple,"waf-detected.txt - WAF Detection Results",max_lines=30)
-    return {"waf_file":str(waf_simple) if waf_simple.exists() else None}
+        if leakix_ips_file.exists() and not is_file_empty(leakix_ips_file): show_file_content(leakix_ips_file,"leakix-ips.txt - IP Exposure Findings",max_lines=30)
+        if leakix_doms_file.exists() and not is_file_empty(leakix_doms_file): show_file_content(leakix_doms_file,"leakix-domains.txt - Domain Exposure Findings",max_lines=30)
+    return {"leakix_ips":str(leakix_ips_file),"leakix_domains":str(leakix_doms_file)}
 
 def write_txt(path,result):
     lines=["CLICKER — BLACK-BOX RECON & ASSESSMENT REPORT","="*72,f"Generated : {result['generated_at']}",""]
@@ -662,7 +786,8 @@ def write_pdf(path,result):
     c.save(); return True
 
 def main():
-    global api_keys_global,args_show_results,args_verbose_output,args_skip_active_subs,args_wordlist,args_resolvers
+    global api_keys_global,args_show_results,args_verbose_output,args_skip_active_subs,args_resume
+    global args_wordlist,args_resolvers,RESUME_FILE,GLOBAL_USE_PROXYCHAINS
     if sys.platform!="linux": print(f"{Y}[!] Clicker is designed for Linux.{RST}")
     parser=argparse.ArgumentParser(description=f"Clicker {VERSION} — Black-box Recon Pipeline | {INSTAGRAM}")
     parser.add_argument("-t","--target",help="Single target domain"); parser.add_argument("--targets-file",help="File with one domain per line")
@@ -670,29 +795,115 @@ def main():
     parser.add_argument("--report-format",choices=["txt","html","both"],default="both"); parser.add_argument("--pdf",action="store_true")
     parser.add_argument("--skip-screenshots",action="store_true"); parser.add_argument("--skip-js",action="store_true")
     parser.add_argument("--skip-active-subs",action="store_true",help="Skip active subdomain enumeration")
+    parser.add_argument("--resume",action="store_true",help="Resume scan from last checkpoint")
+    parser.add_argument("--proxy", help="Single proxy (user:pass@IP:PORT or IP:PORT)")
+    parser.add_argument("--proxy-list", help="Path to proxy list file")
+    parser.add_argument("--auto-proxy", action="store_true", help="Fetch fresh proxies from public APIs automatically")
+    parser.add_argument("--rotate-proxy", action="store_true", help="Rotate proxies per target")
+    parser.add_argument("--proxychains", action="store_true", help="Route all tools via proxychains (requires proxychains4)")
     parser.add_argument("--wordlist",default="/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt",help="Wordlist for active subdomain brute-force")
     parser.add_argument("--resolvers",default="/usr/share/seclists/Discovery/DNS/resolvers.txt",help="Resolvers file for DNS queries")
     parser.add_argument("--keep-sources",action="store_true",help="Keep source files after merge (debug mode)")
     parser.add_argument("--show-phase-results",action="store_true",help="Show detailed results summary after each phase")
     parser.add_argument("--verbose","-v",action="store_true",help="Show FULL output content in terminal after each phase")
     args=parser.parse_args(); print(ASCII_LOGO)
+    
+    GLOBAL_USE_PROXYCHAINS = args.proxychains
+    pm = ProxyManager(proxy=args.proxy, proxy_file=args.proxy_list, auto_fetch=args.auto_proxy, rotate=args.rotate_proxy)
+    pm.apply()
+    
     args_show_results,args_verbose_output=args.show_phase_results,args.verbose
-    args_skip_active_subs,args_wordlist,args_resolvers=args.skip_active_subs,args.wordlist,args.resolvers
+    args_skip_active_subs,args_resume=args.skip_active_subs,args.resume
+    args_wordlist=args.wordlist; args_resolvers=args.resolvers
     api_keys_global=collect_api_keys(Path(args.api_file)); targets=parse_targets(args.target,args.targets_file)
     workspace=Path(args.workspace); mkd(workspace)
+    RESUME_FILE = workspace / ".clicker_resume.json"
     required_tools=["subfinder","sublist3r","chaos","assetfinder","github-subdomains","findomain","waybackurls","gau","httpx","httpx-toolkit","naabu","dnsx","cdncheck","nmap","aquatone","gowitness","katana","waymore","mantra","subzy","subjack","wafw00f","puredns","altdns","shuffledns","dnsrecon","ffuf","curl","jq","grep","sed","awk","sort","cat"]
     available=check_tools(required_tools); result={"generated_at":datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z'),"targets":[]}
     total_phases=11; print(f"\n{BOLD}{M}[►] Starting scan on {len(targets)} target(s) — {total_phases} phases each{RST}\n")
+    
+    resume_state = load_checkpoint() if args_resume else {}
+    
     for domain in targets:
+        pm.apply(domain=domain)
         print(f"\n{BOLD}{W}{'━'*60}{RST}\n{BOLD}{M}  Target : {domain}{RST}\n{BOLD}{W}{'━'*60}{RST}")
-        passive=phase_passive(domain,workspace,api_keys_global,available); active=phase_active_subs(domain,workspace,passive,available)
-        response=phase_response_filter(domain,workspace,passive,available,active); tech=phase_tech_detect(domain,workspace,available)
-        ports=phase_ports(domain,workspace,available)
-        if not args.skip_screenshots: phase_screenshots(domain,workspace,available)
-        urls=phase_content_discovery(domain,workspace,available); phase_leakix(domain,workspace,available)
-        if not args.skip_js: phase_js_recon(domain,workspace,available)
-        phase_takeover(domain,workspace,available); phase_waf(domain,workspace,available)
-        result["targets"].append({"domain":domain,"passive":passive,"active":active,"response":response,"tech":tech,"ports":ports,"urls":urls})
+        passive=active=response=tech=ports=takeover=waf=urls=js=leakix={}
+        skip_until = ""
+        if args_resume and resume_state.get("domain") == domain:
+            skip_until = resume_state.get("last_phase", "")
+            if skip_until: print(f"{G}[+] Resuming scan from phase: {skip_until}{RST}")
+            else: print(f"{Y}[!] No valid checkpoint found, starting from beginning.{RST}")
+
+        if not skip_until or skip_until == "passive": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "passive":
+            passive = phase_passive(domain,workspace,api_keys_global,available)
+            save_checkpoint("passive")
+        else: print(f"{Y}[!] Skipping phase_passive (completed){RST}")
+
+        if not skip_until or skip_until == "active": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "active":
+            active = phase_active_subs(domain,workspace,passive,available)
+            save_checkpoint("active")
+        else: print(f"{Y}[!] Skipping phase_active_subs (completed){RST}")
+
+        if not skip_until or skip_until == "response": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "response":
+            response = phase_response_filter(domain,workspace,passive,available,active)
+            save_checkpoint("response")
+        else: print(f"{Y}[!] Skipping phase_response_filter (completed){RST}")
+
+        if not skip_until or skip_until == "tech": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "tech":
+            tech = phase_tech_detect(domain,workspace,available)
+            save_checkpoint("tech")
+        else: print(f"{Y}[!] Skipping phase_tech_detect (completed){RST}")
+
+        if not skip_until or skip_until == "ports": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "ports":
+            ports = phase_ports(domain,workspace,available)
+            save_checkpoint("ports")
+        else: print(f"{Y}[!] Skipping phase_ports (completed){RST}")
+
+        if not skip_until or skip_until == "takeover": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "takeover":
+            takeover = phase_takeover(domain,workspace,available)
+            save_checkpoint("takeover")
+        else: print(f"{Y}[!] Skipping phase_takeover (completed){RST}")
+
+        if not skip_until or skip_until == "waf": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "waf":
+            waf = phase_waf(domain,workspace,available)
+            save_checkpoint("waf")
+        else: print(f"{Y}[!] Skipping phase_waf (completed){RST}")
+
+        if not skip_until or skip_until == "screenshots": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "screenshots":
+            if not args.skip_screenshots: phase_screenshots(domain,workspace,available)
+            save_checkpoint("screenshots")
+        else: print(f"{Y}[!] Skipping phase_screenshots (completed){RST}")
+
+        if not skip_until or skip_until == "content": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "content":
+            urls = phase_content_discovery(domain,workspace,available)
+            save_checkpoint("content")
+        else: print(f"{Y}[!] Skipping phase_content_discovery (completed){RST}")
+
+        if not skip_until or skip_until == "js": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "js":
+            if not args.skip_js: js = phase_js_recon(domain,workspace,available)
+            save_checkpoint("js")
+        else: print(f"{Y}[!] Skipping phase_js_recon (completed){RST}")
+
+        if not skip_until or skip_until == "leakix": skip_until = ""
+        if not args_resume or not skip_until or skip_until != "leakix":
+            leakix = phase_leakix(domain,workspace,available)
+            save_checkpoint("leakix")
+        else: print(f"{Y}[!] Skipping phase_leakix (completed){RST}")
+
+        result["targets"].append({"domain":domain,"passive":passive,"active":active,"response":response,"tech":tech,"ports":ports,"takeover":takeover,"waf":waf,"urls":urls,"js":js,"leakix":leakix})
+        
+        if RESUME_FILE.exists(): RESUME_FILE.unlink(missing_ok=True)
+
         if not args.keep_sources:
             print(f"\n{DIM}🧹 Final cleanup for {domain}...{RST}"); target_dir=workspace/domain
             for root,dirs,files in os.walk(target_dir,topdown=False):
