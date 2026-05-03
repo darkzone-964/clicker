@@ -1,35 +1,24 @@
 # 🔍 Clicker - Black-box Recon & Vulnerability Assessment Pipeline
+**Version** `v1.4.2` | **Python** `3.8+` | **Platform** `Linux` | **License** `MIT`
 
-<p align="center">
-  <img src="https://img.shields.io/badge/version-v1.0-blue?style=for-the-badge" alt="Version">
-  <img src="https://img.shields.io/badge/python-3.8+-green?style=for-the-badge" alt="Python">
-  <img src="https://img.shields.io/badge/platform-Linux-orange?style=for-the-badge" alt="Platform">
-  <img src="https://img.shields.io/badge/license-MIT-red?style=for-the-badge" alt="License">
-</p>
-
-<p align="center">
-  <strong>Automated reconnaissance pipeline for security researchers & bug hunters</strong>
-</p>
-
-<p align="center">
-  Follow updates: <a href="https://instagram.com/403_linux">@403_linux</a>
-</p>
+> Automated reconnaissance pipeline for security researchers & bug hunters  
+> **Follow updates:** `@403_linux`
 
 ---
 
 ## 📋 Table of Contents
-
 - [✨ Features](#-features)
 - [🔧 Requirements](#-requirements)
 - [📦 Installation](#-installation)
 - [🚀 Quick Start](#-quick-start)
-- [⚙️ Options & Arguments](#%EF%B8%8F-options--arguments)
+- [⚙️ Options & Arguments](#-options--arguments)
+- [🛡️ Proxy Support (NEW v1.4+)](#-proxy-support-new-v14)
 - [📊 Output Structure](#-output-structure)
 - [📁 Project Structure](#-project-structure)
-- [🛠️ API Keys Setup](#%EF%B8%8F-api-keys-setup)
+- [🛠️ API Keys Setup](#-api-keys-setup)
 - [🔄 Phases Overview](#-phases-overview)
 - [📝 Examples](#-examples)
-- [⚠️ Disclaimer](#%EF%B8%8F-disclaimer)
+- [⚠️ Disclaimer](#-disclaimer)
 - [🤝 Contributing](#-contributing)
 - [📄 License](#-license)
 
@@ -39,20 +28,20 @@
 
 ### 🔍 Reconnaissance
 - **Passive Subdomain Enumeration**: 10+ sources (Subfinder, Sublist3r, Chaos, Assetfinder, crt.sh, WaybackURLs, GAU, etc.)
-- **Active Subdomain Discovery**: Bruteforce with `puredns`, permutation scanning with `altdns+shuffledns`, DNS enumeration with `dnsrecon`, HTTP fallback with `ffuf`
-- **Response Filtering**: HTTP status code filtering (200/302/403/404) with `httpx`
+- **Active Subdomain Discovery**: Bruteforce with puredns, permutation scanning with altdns+shuffledns, DNS enumeration with dnsrecon, HTTP fallback with ffuf
+- **Response Filtering**: HTTP status code filtering (200/302/403/404) with httpx
 - **Technology Detection**: Stack fingerprinting, IP extraction, and CDN detection
 
 ### 🎯 Attack Surface Mapping
-- **Port Scanning**: Comprehensive port discovery with `naabu` + service detection with `nmap -sC`
-- **Screenshot Capture**: Visual reconnaissance with `aquatone` or `gowitness`
-- **Content Discovery**: URL enumeration via `waybackurls`, `gau`, `katana`, `waymore`
-- **JS Recon**: JavaScript file extraction + secret/API key detection with `mantra`
+- **Port Scanning**: Comprehensive port discovery with naabu + service detection with nmap -sC
+- **Screenshot Capture**: Visual reconnaissance with aquatone or gowitness
+- **Content Discovery**: URL enumeration via waybackurls, gau, katana, waymore
+- **JS Recon**: JavaScript file extraction + secret/API key detection with mantra
 
 ### 🛡️ Security Checks
 - **LeakIX Integration**: Exposure check for misconfigured services & leaked data
-- **Subdomain Takeover**: Detection with `subzy`, `subjack`, and `nuclei` takeover templates
-- **WAF Detection**: Web Application Firewall identification with `wafw00f` (batched processing)
+- **Subdomain Takeover**: Detection with subzy, subjack, and nuclei takeover templates
+- **WAF Detection**: Web Application Firewall identification with wafw00f (batched processing)
 - **Shodan Enrichment**: IP intelligence lookup (requires API key)
 
 ### 📈 Reporting & UX
@@ -61,15 +50,18 @@
 - **Smart Cleanup**: Auto-remove empty files & temporary artifacts
 - **Progress Tracking**: Visual progress bars for each phase
 
+### 🔄 Resume & Reliability (NEW v1.4+)
+- **Checkpoint System**: `--resume` flag to continue interrupted scans from last completed phase
+- **Auto-Fallback Wordlists**: Automatically downloads `resolvers.txt` and `wordlist` if not found locally
+- **Smart Error Handling**: Cascading error prevention with empty file safeguards
+
 ---
 
 ## 🔧 Requirements
 
 ### 🐍 Python Dependencies
-```bash
-python3 >= 3.8
-reportlab  # Optional: for PDF reports
-```
+- `python3 >= 3.8`
+- `reportlab` *(Optional: for PDF reports)*
 
 ### 🛠️ External Tools (Install via package manager or Go)
 
@@ -80,7 +72,7 @@ reportlab  # Optional: for PDF reports
 | `chaos` | ProjectDiscovery subdomain DB | `go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest` |
 | `assetfinder` | Subdomain discovery | `go install github.com/tomnomnom/assetfinder@latest` |
 | `github-subdomains` | GitHub subdomain search | `go install github.com/gwen001/github-subdomains@latest` |
-| `findomain` | Fast subdomain finder | [Download releases](https://github.com/Findomain/Findomain/releases) |
+| `findomain` | Fast subdomain finder | [Download releases](https://github.com/Edu4rdSHL/findomain/releases) |
 | `waybackurls` | Archive URL extraction | `go install github.com/tomnomnom/waybackurls@latest` |
 | `gau` | GetAllURLs from archives | `go install github.com/lc/gau/v2/cmd/gau@latest` |
 | `httpx` / `httpx-toolkit` | HTTP probing & tech detection | `go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest` |
@@ -99,6 +91,7 @@ reportlab  # Optional: for PDF reports
 | `subzy` / `subjack` | Subdomain takeover | `go install github.com/PentestPad/subzy@latest` |
 | `wafw00f` | WAF detection | `pip install wafw00f` |
 | `curl` + `jq` | API interactions | `sudo apt install curl jq` |
+| `proxychains4` *(Optional)* | Route TCP tools via proxy | `sudo apt install proxychains4` |
 
 > 💡 **Tip**: Most Go tools can be installed with `go install`. Ensure `$GOPATH/bin` is in your `PATH`.
 
@@ -118,10 +111,10 @@ pip3 install reportlab  # For PDF report generation
 ```
 
 ### 3️⃣ Install External Tools
-Use the installation commands from the [Requirements](#-requirements) section above, or run:
+Use the installation commands from the Requirements section above, or run:
 ```bash
 # Quick install for Kali/Debian users
-sudo apt update && sudo apt install -y nmap curl jq
+sudo apt update && sudo apt install -y nmap curl jq proxychains4
 
 # Install Go tools (requires Go >= 1.21)
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
@@ -165,6 +158,26 @@ python3 clicker.py -t example.com \
   --resolvers /path/to/custom-resolvers.txt
 ```
 
+### 🔹 Resume Interrupted Scan
+```bash
+python3 clicker.py -t example.com --resume -v
+```
+
+### 🔹 Scan with Proxy Support
+```bash
+# Single manual proxy
+python3 clicker.py -t example.com --proxy 1.2.3.4:8080 -v
+
+# Auto-fetch fresh proxies + rotate per target
+python3 clicker.py -t example.com --auto-proxy --rotate-proxy -v
+
+# Hybrid mode: Passive runs direct, Active uses proxy (RECOMMENDED)
+python3 clicker.py -t example.com --hybrid-proxy --auto-proxy --rotate-proxy -v
+
+# Full proxychains routing for ALL tools (including nmap/naabu)
+python3 clicker.py -t example.com --proxychains --proxy 1.2.3.4:8080 -v
+```
+
 ---
 
 ## ⚙️ Options & Arguments
@@ -176,7 +189,7 @@ python3 clicker.py -t example.com \
 | `--workspace` | | Output directory for results | `clicker_output` |
 | `--api-file` | | File to store/load API keys | `clicker_api.env` |
 | `--report-format` | | Report format: `txt`, `html`, or `both` | `both` |
-| `--pdf` | | Generate PDF report (requires `reportlab`) | `False` |
+| `--pdf` | | Generate PDF report (requires reportlab) | `False` |
 | `--skip-screenshots` | | Skip screenshot capture phase | `False` |
 | `--skip-js` | | Skip JavaScript reconnaissance phase | `False` |
 | `--skip-active-subs` | | Skip active subdomain enumeration | `False` |
@@ -185,12 +198,62 @@ python3 clicker.py -t example.com \
 | `--keep-sources` | | Keep intermediate source files (debug mode) | `False` |
 | `--show-phase-results` | | Show summary after each phase completes | `False` |
 | `--verbose` | `-v` | Show full output content in terminal | `False` |
+| `--resume` | | Resume scan from last checkpoint | `False` |
+| `--proxy` | | Single proxy (`user:pass@IP:PORT` or `IP:PORT`) | *None* |
+| `--proxy-list` | | Path to proxy list file (one `IP:PORT` per line) | *None* |
+| `--auto-proxy` | | Fetch fresh proxies from public APIs automatically | `False` |
+| `--rotate-proxy` | | Rotate proxies per target/domain | `False` |
+| `--proxychains` | | Route ALL tools via proxychains (requires `proxychains4`) | `False` |
+| `--hybrid-proxy` | | **Smart mode**: Proxy ONLY for active scanning, Passive runs directly *(RECOMMENDED)* | `False` |
 | `--help` | `-h` | Show help message and exit | - |
 
 ---
 
-## 📊 Output Structure
+## 🛡️ Proxy Support (NEW v1.4+)
 
+Clicker v1.4+ introduces comprehensive proxy support with intelligent routing:
+
+### 🔹 Proxy Modes
+
+| Mode | Command | Behavior | Best For |
+|------|---------|----------|----------|
+| **Direct** | *(no flags)* | All tools connect directly | Fastest, no anonymity needed |
+| **Manual Proxy** | `--proxy IP:PORT` | HTTP tools use proxy via `HTTP_PROXY` env var | Simple anonymity for HTTP requests |
+| **Auto-Fetch** | `--auto-proxy` | Fetches fresh proxies from public APIs | Testing with rotating free proxies |
+| **Rotate** | `--rotate-proxy` | Changes proxy per target domain | Avoiding rate limits per target |
+| **Proxychains** | `--proxychains` | Wraps ALL commands (including `nmap`, `naabu`) via `proxychains4` | Full TCP/UDP anonymity |
+| **Hybrid** ⭐ | `--hybrid-proxy` | **Passive tools run direct** (fast), **Active tools use proxy** (safe) | **Best balance: speed + anonymity** |
+
+### 🔹 How Hybrid Mode Works
+```mermaid
+graph TD
+    A[Start Scan] --> B{Is tool Passive?}
+    B -->|Yes: subfinder, crt.sh, gau...| C[Run DIRECT - No proxy]
+    B -->|No: httpx, naabu, nmap...| D{Is --proxychains set?}
+    D -->|Yes| E[Run via proxychains]
+    D -->|No| F[Run with HTTP_PROXY env var]
+    C --> G[Fast results, no proxy overhead]
+    E --> H[Full anonymity for active scanning]
+    F --> I[HTTP-level anonymity]
+```
+
+### 🔹 Proxy Health & Fallback
+- ✅ **Auto health check**: Tests proxy connectivity before each phase
+- ✅ **Smart fallback**: If a command fails with proxy, retries automatically without it
+- ✅ **Environment cleanup**: Removes `HTTP_PROXY` vars for network tools to prevent conflicts
+
+### 🔹 Example Proxy List Format (`proxies.txt`)
+```
+185.162.128.45:8080
+user:pass@45.12.34.56:9090
+socks5://127.0.0.1:1080
+```
+
+> ⚠️ **Warning**: Free public proxies are often slow, unstable, or logged. For professional use, consider paid residential/datacenter proxies.
+
+---
+
+## 📊 Output Structure
 ```
 clicker_output/
 ├── example.com/
@@ -232,29 +295,27 @@ clicker_output/
 ---
 
 ## 📁 Project Structure
-
 ```
 clicker.py          # Main executable script
 clicker_api.env     # API keys configuration (auto-generated)
-requirements.txt    # Python dependencies (optional)
+CHANGELOG.md        # Version history & updates
 README.md           # This documentation
 ```
 
 ---
 
 ## 🛠️ API Keys Setup
-
 Clicker supports optional API integrations for enhanced results. On first run, you'll be prompted to configure:
 
 | Key | Service | Purpose | Get Key |
 |-----|---------|---------|---------|
-| `CHAOS_API_KEY` | [Chaos by ProjectDiscovery](https://chaos.projectdiscovery.io) | Access Chaos subdomain database | [Sign up](https://chaos.projectdiscovery.io) |
-| `VT_API_KEY` | [VirusTotal](https://virustotal.com) | Subdomain enumeration via VT API | [Get API key](https://www.virustotal.com/gui/my-apikey) |
-| `GITHUB_TOKEN` | [GitHub](https://github.com) | Search GitHub for subdomains | [Create token](https://github.com/settings/tokens) |
-| `SHODAN_API` | [Shodan](https://shodan.io) | IP intelligence & exposure data | [Get API key](https://account.shodan.io) |
-| `LEAKIX_API` | [LeakIX](https://leakix.net) | Exposure & misconfiguration checks | [Get API key](https://leakix.net/settings) |
+| `CHAOS_API_KEY` | Chaos by ProjectDiscovery | Access Chaos subdomain database | [Sign up](https://chaos.projectdiscovery.io/) |
+| `VT_API_KEY` | VirusTotal | Subdomain enumeration via VT API | [Get API key](https://www.virustotal.com/) |
+| `GITHUB_TOKEN` | GitHub | Search GitHub for subdomains | [Create token](https://github.com/settings/tokens) |
+| `SHODAN_API` | Shodan | IP intelligence & exposure data | [Get API key](https://account.shodan.io/) |
+| `LEAKIX_API` | LeakIX | Exposure & misconfiguration checks | [Get API key](https://leakix.net/settings) |
 
-> 🔐 Keys are stored locally in `clicker_api.env` — **never share this file**.
+🔐 **Keys are stored locally in `clicker_api.env` — never share this file.**
 
 To manually edit keys:
 ```bash
@@ -264,24 +325,24 @@ nano clicker_api.env
 ---
 
 ## 🔄 Phases Overview
+Clicker executes 11 sequential phases per target:
 
-Clicker executes **11 sequential phases** per target:
+| Phase | Name | Output |
+|-------|------|--------|
+| `[1]` | Passive Subdomain Enumeration | `allsubs.txt` |
+| `[1.5]` | Active Subdomain Enumeration | `active_subs.txt` + merge |
+| `[2]` | Response Filtering | `alive-final.txt` |
+| `[3]` | Technology Detection | `subs-Tech.txt` + `ips.txt` |
+| `[4]` | Port Scanning | `open-ports-full.txt` + `nmap-scripts.txt` |
+| `[5]` | Subdomain Takeover Detection | `takeover/subzy-results.txt` |
+| `[6]` | WAF Detection | `waf/waf-detected.txt` |
+| `[7]` | Screenshots | `screenshots/aquatone` or `gowitness/` |
+| `[8]` | Content Discovery | `final-urls.txt` |
+| `[9]` | JS Recon & Secret Discovery | `jsfiles.txt` + `secrets-found.txt` |
+| `[10]` | LeakIX Exposure Check | `leakix-ips.txt` + `leakix-domains.txt` |
 
-```
-[1]   Passive Subdomain Enumeration   → allsubs.txt
-[1.5] Active Subdomain Enumeration    → active_subs.txt + merge
-[2]   Response Filtering              → alive-final.txt
-[3]   Technology Detection            → subs-Tech.txt + ips.txt
-[4]   Port Scanning                   → open-ports-full.txt + nmap-scripts.txt
-[5]   Screenshots                     → screenshots/aquatone or gowitness/
-[6]   Content Discovery               → final-urls.txt
-[7]   LeakIX Exposure Check           → leakix-ips.txt + leakix-domains.txt
-[8]   JS Recon & Secret Discovery     → jsfiles.txt + secrets-found.txt
-[9]   Subdomain Takeover Detection    → takeover/subzy-results.txt
-[10]  WAF Detection                   → waf/waf-detected.txt
-```
-
-> ✅ Each phase auto-cleans empty/temporary files unless `--keep-sources` is used.
+✅ Each phase auto-cleans empty/temporary files unless `--keep-sources` is used.  
+✅ With `--resume`, completed phases are skipped on re-run.
 
 ---
 
@@ -306,11 +367,19 @@ python3 clicker.py -t target.com \
   --report-format txt
 ```
 
-### 🔹 Custom Wordlist for Active Enumeration
+### 🔹 Hybrid Proxy Scan (RECOMMENDED)
 ```bash
 python3 clicker.py -t target.com \
-  --wordlist ./wordlists/subdomains-custom.txt \
-  --resolvers ./wordlists/resolvers-trusted.txt
+  --hybrid-proxy \
+  --auto-proxy \
+  --rotate-proxy \
+  --verbose
+```
+
+### 🔹 Resume Interrupted Scan
+```bash
+# After interruption, continue from last phase:
+python3 clicker.py -t target.com --resume -v
 ```
 
 ### 🔹 Batch Scan from File
@@ -339,16 +408,20 @@ cat clicker_output/example.com/waf/waf-detected.txt
 
 ## ⚠️ Disclaimer
 
-> 🔒 **Educational & Authorized Use Only**  
-> Clicker is designed for security researchers, penetration testers, and bug bounty hunters.  
-> **Always obtain explicit written permission** before scanning any target you do not own.  
-> Unauthorized scanning may violate laws (e.g., CFAA, GDPR, Computer Misuse Act).  
-> The authors assume no liability for misuse of this tool.
+### 🔒 Educational & Authorized Use Only
+- Clicker is designed for **security researchers, penetration testers, and bug bounty hunters**.
+- **Always obtain explicit written permission** before scanning any target you do not own.
+- Unauthorized scanning may violate laws (e.g., CFAA, GDPR, Computer Misuse Act).
+- The authors assume **no liability** for misuse of this tool.
+
+### 🌐 Proxy Usage Notice
+- Using proxies does **not guarantee anonymity**; advanced targets may still detect scanning patterns.
+- Free public proxies may log your traffic — use trusted providers for sensitive engagements.
+- Respect rate limits of APIs and target infrastructure to avoid service disruption.
 
 ---
 
 ## 🤝 Contributing
-
 Contributions are welcome! To contribute:
 
 1. Fork the repository
@@ -358,7 +431,7 @@ Contributions are welcome! To contribute:
 5. Open a Pull Request
 
 ### 🐛 Reporting Issues
-- Use the [GitHub Issues](https://github.com/403-linux/clicker/issues) tab
+- Use the GitHub Issues tab
 - Include: OS, Python version, command used, and full error output
 
 ### 💡 Feature Requests
@@ -368,8 +441,7 @@ Contributions are welcome! To contribute:
 ---
 
 ## 📄 License
-
-Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more information.
+Distributed under the **MIT License**. See `LICENSE` for more information.
 
 ```
 MIT License
@@ -397,10 +469,7 @@ SOFTWARE.
 
 ---
 
-<p align="center">
-  <strong>Made with ❤️ by <a href="https://instagram.com/403_linux">@403_linux</a></strong>
-</p>
+> Made with ❤️ by `@403_linux`  
+> **⭐ Star this repo if you find it useful!**
 
-<p align="center">
-  <a href="#-clicker---black-box-recon--vulnerability-assessment-pipeline">⬆ Back to Top</a>
-</p>
+⬆ [Back to Top](#-clicker---black-box-recon--vulnerability-assessment-pipeline)
