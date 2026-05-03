@@ -1,5 +1,5 @@
 # 🔍 Clicker - Black-box Recon & Vulnerability Assessment Pipeline
-**Version** `v1.4.2` | **Python** `3.8+` | **Platform** `Linux` | **License** `MIT`
+**Version** `v1.2` | **Python** `3.8+` | **Platform** `Linux` | **License** `MIT`
 
 > Automated reconnaissance pipeline for security researchers & bug hunters  
 > **Follow updates:** `@403_linux`
@@ -12,7 +12,7 @@
 - [📦 Installation](#-installation)
 - [🚀 Quick Start](#-quick-start)
 - [⚙️ Options & Arguments](#-options--arguments)
-- [🛡️ Proxy Support (NEW v1.4+)](#-proxy-support-new-v14)
+- [🛡️ Proxy Support (NEW v1.2)](#-proxy-support-new-v14)
 - [📊 Output Structure](#-output-structure)
 - [📁 Project Structure](#-project-structure)
 - [🛠️ API Keys Setup](#-api-keys-setup)
@@ -50,7 +50,7 @@
 - **Smart Cleanup**: Auto-remove empty files & temporary artifacts
 - **Progress Tracking**: Visual progress bars for each phase
 
-### 🔄 Resume & Reliability (NEW v1.4+)
+### 🔄 Resume & Reliability (NEW v1.2)
 - **Checkpoint System**: `--resume` flag to continue interrupted scans from last completed phase
 - **Auto-Fallback Wordlists**: Automatically downloads `resolvers.txt` and `wordlist` if not found locally
 - **Smart Error Handling**: Cascading error prevention with empty file safeguards
@@ -209,9 +209,9 @@ python3 clicker.py -t example.com --proxychains --proxy 1.2.3.4:8080 -v
 
 ---
 
-## 🛡️ Proxy Support (NEW v1.4+)
+## 🛡️ Proxy Support (NEW v1.2)
 
-Clicker v1.4+ introduces comprehensive proxy support with intelligent routing:
+Clicker v1.2 introduces comprehensive proxy support with intelligent routing:
 
 ### 🔹 Proxy Modes
 
