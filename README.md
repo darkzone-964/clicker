@@ -1,5 +1,5 @@
 # 🔍 Clicker - Black-box Recon & Vulnerability Assessment Pipeline
-**Version** `v1.2` | **Python** `3.8+` | **Platform** `Linux` | **License** `MIT`
+**Version** `v1.7.1` | **Python** `3.8+` | **Platform** `Linux` | **License** `MIT`
 
 > Automated reconnaissance pipeline for security researchers & bug hunters  
 > **Follow updates:** `@403_linux`
@@ -12,7 +12,8 @@
 - [📦 Installation](#-installation)
 - [🚀 Quick Start](#-quick-start)
 - [⚙️ Options & Arguments](#-options--arguments)
-- [🛡️ Proxy Support (NEW v1.2)](#-proxy-support-new-v14)
+- [🛡️ Proxy Support](#-proxy-support)
+- [🧠 Smart Features (NEW v1.7.1)](#-smart-features-new-v171)
 - [📊 Output Structure](#-output-structure)
 - [📁 Project Structure](#-project-structure)
 - [🛠️ API Keys Setup](#-api-keys-setup)
@@ -41,7 +42,7 @@
 ### 🛡️ Security Checks
 - **LeakIX Integration**: Exposure check for misconfigured services & leaked data
 - **Subdomain Takeover**: Detection with subzy, subjack, and nuclei takeover templates
-- **WAF Detection**: Web Application Firewall identification with wafw00f (batched processing)
+- **WAF Detection**: Web Application Firewall identification with wafw00f (batched processing) + httpx + header analysis
 - **Shodan Enrichment**: IP intelligence lookup (requires API key)
 
 ### 📈 Reporting & UX
@@ -50,7 +51,7 @@
 - **Smart Cleanup**: Auto-remove empty files & temporary artifacts
 - **Progress Tracking**: Visual progress bars for each phase
 
-### 🔄 Resume & Reliability (NEW v1.2)
+### 🔄 Resume & Reliability
 - **Checkpoint System**: `--resume` flag to continue interrupted scans from last completed phase
 - **Auto-Fallback Wordlists**: Automatically downloads `resolvers.txt` and `wordlist` if not found locally
 - **Smart Error Handling**: Cascading error prevention with empty file safeguards
@@ -209,9 +210,9 @@ python3 clicker.py -t example.com --proxychains --proxy 1.2.3.4:8080 -v
 
 ---
 
-## 🛡️ Proxy Support (NEW v1.2)
+## 🛡️ Proxy Support
 
-Clicker v1.2 introduces comprehensive proxy support with intelligent routing:
+Clicker introduces comprehensive proxy support with intelligent routing:
 
 ### 🔹 Proxy Modes
 
@@ -250,6 +251,116 @@ socks5://127.0.0.1:1080
 ```
 
 > ⚠️ **Warning**: Free public proxies are often slow, unstable, or logged. For professional use, consider paid residential/datacenter proxies.
+
+---
+
+## 🧠 Smart Features (NEW v1.7.1)
+
+### 🔹 Early WAF Detection (Phase 2)
+WAF detection now executes immediately after passive subdomain enumeration, enabling automatic optimization for all subsequent scanning phases.
+
+```
+Execution Flow:
+[1] Passive Subdomain Enumeration
+[2] WAF Detection ⭐ ← Now runs here!
+[3] Response Filtering (WAF-optimized)
+[4] Technology Detection (WAF-optimized)
+[5] Port Scanning (WAF-optimized)
+...
+```
+
+### 🔹 Dynamic WAF-Aware Tool Configuration
+Clicker automatically adjusts tool parameters based on detected WAF type:
+
+| WAF Type | httpx Options | naabu Options | nmap Options |
+|----------|--------------|---------------|-------------|
+| **Cloudflare** | `-timeout 10 -retries 1` | `-rate 100 -timeout 1000` | `-T3 --max-retries 1` |
+| **Akamai** | `-timeout 15 -retries 2` | `-rate 80 -timeout 1500` | `-T3 --host-timeout 15m` |
+| **Imperva** | `-timeout 20 -retries 2` | `-rate 50 -timeout 2000` | `-T2 --max-retries 2` |
+| **Default** | `-timeout 10 -retries 1` | `-rate 200 -timeout 1000` | `-T4 --max-retries 1` |
+
+**Usage**: Fully automatic — no flags needed. Detection results are logged:
+```
+[*] Detected WAF Type: CLOUDFLARE
+[hybrid] Applying Cloudflare-optimized options...
+```
+
+### 🔹 Three-Layer WAF Detection Engine
+Enhanced accuracy through intelligent fallback chain:
+```
+Layer 1: httpx technology fingerprinting
+   ↓ (if no WAF detected)
+Layer 2: wafw00f with JSON batch processing
+   ↓ (if no WAF detected)
+Layer 3: Manual HTTP header signature analysis
+```
+
+**Supported Signatures**:
+- Cloudflare: `cf-ray`, `cf-cache-status`, `server: cloudflare`
+- Akamai: `akamai-grn`, `x-akamai-transformed`, `edgekey`
+- Imperva: `incap-signal`, `x-cdn`, `server: imperva`
+- AWS: `x-amz-cf-id`, `x-amz-request-id`
+- Sucuri: `x-sucuri-id`, `x-sucuri-cache`
+
+### 🔹 Smart Wordlist Selection by Target Type
+Automatic wordlist optimization based on target profile:
+
+| Target Profile | Detection Keywords | Wordlist Strategy |
+|---------------|-------------------|------------------|
+| ☁️ Cloud | `aws`, `azure`, `gcp`, `heroku` | Focused cloud-oriented lists |
+| 🏢 Enterprise | `corp`, `enterprise`, `inc`, `ltd` | Comprehensive enterprise lists |
+| 🏛️ Government | `gov`, `government`, `state` | Gov-targeted deep lists |
+| 🛒 E-commerce | `shop`, `store`, `market`, `cart` | Content-rich discovery lists |
+| 🚀 Startup | `app`, `tech`, `io`, `ai`, `labs` | Lightweight agile lists |
+
+**Usage**: Automatic — detected from domain name patterns.
+
+### 🔹 Enhanced Resume with State Preservation
+The `--resume` flag now preserves detected WAF type and completion flags:
+```python
+{
+  "last_phase": "waf",
+  "timestamp": "2024-01-15T10:30:00",
+  "completed": true,
+  "waf_type": "cloudflare"  # ← Preserved for next session
+}
+```
+
+### 🔹 Interactive Phase Control via Ctrl+C
+Press `Ctrl+C` during any phase to:
+- ⏭️ Skip current phase only
+- ➡️ Automatically continue to next phase
+- 📊 Preserve all completed results
+
+```
+[Phase 4: Port Scanning] ████████░░░░ 60%
+[!] Ctrl+C detected — skipping current phase...
+[+] Continuing to Phase 5: Subdomain Takeover Detection
+```
+
+### 🔹 Advanced Hybrid Proxy with Auto-Fallback
+Smart proxy routing with automatic recovery:
+```
+Hybrid Mode Logic:
+├── Passive Tools → Run DIRECT (fast)
+└── Active Tools → Use proxy (anonymous)
+    └── If command fails → Auto-retry WITHOUT proxy
+```
+
+### 🔹 Automatic Fallback Wordlist Download
+Never stall due to missing local files:
+```
+[!] Wordlist not found at /usr/share/seclists/...
+[!] Downloading fallback from SecLists...
+[+] Fallback downloaded successfully — continuing scan
+```
+
+### 🔹 Enhanced Verbose Output with Smart Coloring
+Color-coded terminal feedback in verbose mode:
+- 🟢 `✅` Successful responses `[200]`, `[302]`
+- 🟡 `⚠️` Access issues `[403]`, `[404]`
+- 🔵 `ℹ️` Informational findings
+- ⚪ Clean, structured phase progress tracking
 
 ---
 
@@ -325,24 +436,24 @@ nano clicker_api.env
 ---
 
 ## 🔄 Phases Overview
-Clicker executes 11 sequential phases per target:
+Clicker executes 10 sequential phases per target:
 
 | Phase | Name | Output |
 |-------|------|--------|
 | `[1]` | Passive Subdomain Enumeration | `allsubs.txt` |
-| `[1.5]` | Active Subdomain Enumeration | `active_subs.txt` + merge |
-| `[2]` | Response Filtering | `alive-final.txt` |
-| `[3]` | Technology Detection | `subs-Tech.txt` + `ips.txt` |
-| `[4]` | Port Scanning | `open-ports-full.txt` + `nmap-scripts.txt` |
-| `[5]` | Subdomain Takeover Detection | `takeover/subzy-results.txt` |
-| `[6]` | WAF Detection | `waf/waf-detected.txt` |
+| `[2]` | **WAF Detection** ⭐ | `waf-detected.txt` |
+| `[3]` | Response Filtering | `alive-final.txt` |
+| `[4]` | Technology Detection | `subs-Tech.txt` + `ips.txt` |
+| `[5]` | Port Scanning | `open-ports-full.txt` + `nmap-scripts.txt` |
+| `[6]` | Subdomain Takeover Detection | `takeover/subzy-results.txt` |
 | `[7]` | Screenshots | `screenshots/aquatone` or `gowitness/` |
 | `[8]` | Content Discovery | `final-urls.txt` |
 | `[9]` | JS Recon & Secret Discovery | `jsfiles.txt` + `secrets-found.txt` |
 | `[10]` | LeakIX Exposure Check | `leakix-ips.txt` + `leakix-domains.txt` |
 
 ✅ Each phase auto-cleans empty/temporary files unless `--keep-sources` is used.  
-✅ With `--resume`, completed phases are skipped on re-run.
+✅ With `--resume`, completed phases are skipped on re-run.  
+✅ WAF type detected in Phase 2 automatically optimizes Phases 3-5.
 
 ---
 
@@ -390,6 +501,24 @@ python3 clicker.py -t target.com --resume -v
 # api.example.net
 
 python3 clicker.py --targets-file targets.txt --verbose
+```
+
+### 🔹 WAF-Optimized Scan (Automatic)
+```bash
+# Just run normally — WAF detection happens in Phase 2
+python3 clicker.py -t target.com -v
+
+# Output will show:
+[*] Detected WAF Type: CLOUDFLARE
+[hybrid] Using Cloudflare-optimized httpx options...
+[hybrid] Using Cloudflare-optimized naabu options...
+```
+
+### 🔹 Smart Wordlist Selection
+```bash
+# Clicker auto-detects target type and selects optimal wordlist
+python3 clicker.py -t api.cloud.example.com -v
+# Automatically uses cloud-oriented wordlists for "cloud" keyword
 ```
 
 ### 🔹 View Results in Terminal
