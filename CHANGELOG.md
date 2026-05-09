@@ -5,6 +5,23 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [v1.3] - 2026-05-09
+### 🚀 Added
+- **Early WAF Detection (Phase 2)**: Moved WAF detection to execute immediately after passive subdomain enumeration, enabling automatic optimization for all subsequent scanning phases.
+- **Dynamic WAF-Aware Tool Configuration**: Automatic adjustment of `httpx`, `naabu`, and `nmap` parameters based on detected WAF type (Cloudflare, Akamai, Imperva, or default).
+- **Three-Layer WAF Detection Engine**: Enhanced accuracy through intelligent fallback chain:
+  - Layer 1: `httpx` technology fingerprinting
+  - Layer 2: `wafw00f` with JSON batch processing
+  - Layer 3: Manual HTTP header signature analysis
+- **Smart Wordlist Selection by Target Type**: Automatic wordlist optimization based on target profile detection (Cloud, Enterprise, Government, E-commerce, Startup).
+- **Enhanced Resume with State Preservation**: `--resume` flag now preserves detected WAF type and completion flags for seamless continuation with consistent tool optimization.
+- **Interactive Phase Control via Ctrl+C**: Press `Ctrl+C` during any phase to skip only the current phase and automatically continue to the next.
+- **Advanced Hybrid Proxy with Auto-Fallback**: Smart proxy routing with automatic recovery — passive tools run direct, active tools use proxy, with auto-retry without proxy on failure.
+- **Automatic Fallback Wordlist Download**: Auto-downloads `resolvers.txt` and wordlists from trusted sources if not found locally.
+- **Enhanced Verbose Output with Smart Coloring**: Color-coded terminal feedback for successful responses, access issues, and informational findings.
+
+---
+
 ## [v1.2] - 2026-05-03
 ### 🐛 Fixed
 - **Critical Syntax Error**: Fixed `SyntaxError: invalid syntax` in `parse_waf_simple_inner()` by completing the `for entry in data:` loop in WAF parsing module.
@@ -41,7 +58,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [v1.3.0] - 2026-05-02
+## [v1.2] - 2026-05-02
 ### 🚀 Added
 - **Proxychains Integration**: New `--proxychains` flag to route ALL network tools (including `nmap`, `naabu`, `dnsx`) through `proxychains4`/`proxychains`.
 - **Authenticated Proxy Support**: Full compatibility with `user:pass@IP:PORT` proxy format across all HTTP-based tools.
@@ -57,7 +74,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [v1.2.0] - 2026-05-01
+## [v1.2] - 2026-05-01
 ### 🚀 Added
 - **Smart Proxy Manager**: Introduced `ProxyManager` class for centralized proxy handling with rotation support.
 - **New CLI Flags**:
@@ -75,7 +92,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [v1.1.0] - 2026-04-30
+## [v1.1] - 2026-04-30
 ### 🚀 Added
 - **Resume System (`--resume`)**: Automatically saves progress to `.clicker_resume.json` after each phase completion.
 - **Smart Phase Skipping**: When resuming, skips completed phases and continues from last checkpoint.
@@ -87,7 +104,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [v1.0.0] - 2026-04-28
+## [v1.0] - 2026-04-28
 ### 🚀 Added
 - **Complete Architecture Rewrite**: Migrated from legacy `v6.x` to clean, production-ready codebase.
 - **Optimized Phase Order**: Moved `Subdomain Takeover` and `WAF Detection` earlier for faster critical findings; deferred `Screenshots` to reduce initial load.
