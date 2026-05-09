@@ -1,5 +1,5 @@
 # 🔍 Clicker - Black-box Recon & Vulnerability Assessment Pipeline
-**Version** `v1.7.1` | **Python** `3.8+` | **Platform** `Linux` | **License** `MIT`
+**Version** `v1.3` | **Python** `3.8+` | **Platform** `Linux` | **License** `MIT`
 
 > Automated reconnaissance pipeline for security researchers & bug hunters  
 > **Follow updates:** `@403_linux`
@@ -13,7 +13,7 @@
 - [🚀 Quick Start](#-quick-start)
 - [⚙️ Options & Arguments](#-options--arguments)
 - [🛡️ Proxy Support](#-proxy-support)
-- [🧠 Smart Features (NEW v1.7.1)](#-smart-features-new-v171)
+- [🧠 Smart Features (NEW v1.3)](#-smart-features-new-v171)
 - [📊 Output Structure](#-output-structure)
 - [📁 Project Structure](#-project-structure)
 - [🛠️ API Keys Setup](#-api-keys-setup)
