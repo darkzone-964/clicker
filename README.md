@@ -1,25 +1,30 @@
-# 🔍 Clicker - Black-box Recon & Vulnerability Assessment Pipeline
-**Version** `v1.3` | **Python** `3.8+` | **Platform** `Linux` | **License** `MIT`
+```markdown
+# 🔍 Clicker — Black-box Recon & Bug Bounty Pipeline
 
-> Automated reconnaissance pipeline for security researchers & bug hunters  
-> **Follow updates:** `@403_linux`
+**Version v2.0** | Python 3.8+ | Platform Linux | License MIT
+
+Automated reconnaissance pipeline for security researchers & bug hunters
+Follow updates: [@403_linux](https://instagram.com/403_linux)
 
 ---
 
 ## 📋 Table of Contents
+
 - [✨ Features](#-features)
+- [🆕 What's New in v2.0](#-whats-new-in-v20)
 - [🔧 Requirements](#-requirements)
 - [📦 Installation](#-installation)
 - [🚀 Quick Start](#-quick-start)
-- [⚙️ Options & Arguments](#-options--arguments)
-- [🛡️ Proxy Support](#-proxy-support)
-- [🧠 Smart Features (NEW v1.3)](#-smart-features-new-v171)
+- [⚙️ Options & Arguments](#️-options--arguments)
+- [🛡️ Proxy Support](#️-proxy-support)
+- [🧠 Smart Features](#-smart-features)
+- [🎯 IDOR Testing Module](#-idor-testing-module)
 - [📊 Output Structure](#-output-structure)
 - [📁 Project Structure](#-project-structure)
-- [🛠️ API Keys Setup](#-api-keys-setup)
+- [🛠️ API Keys Setup](#️-api-keys-setup)
 - [🔄 Phases Overview](#-phases-overview)
 - [📝 Examples](#-examples)
-- [⚠️ Disclaimer](#-disclaimer)
+- [⚠️ Disclaimer](#️-disclaimer)
 - [🤝 Contributing](#-contributing)
 - [📄 License](#-license)
 
@@ -28,102 +33,190 @@
 ## ✨ Features
 
 ### 🔍 Reconnaissance
-- **Passive Subdomain Enumeration**: 10+ sources (Subfinder, Sublist3r, Chaos, Assetfinder, crt.sh, WaybackURLs, GAU, etc.)
-- **Active Subdomain Discovery**: Bruteforce with puredns, permutation scanning with altdns+shuffledns, DNS enumeration with dnsrecon, HTTP fallback with ffuf
-- **Response Filtering**: HTTP status code filtering (200/302/403/404) with httpx
+- **Passive Subdomain Enumeration**: 12+ sources (Subfinder, Sublist3r, Chaos, Assetfinder, crt.sh, WaybackURLs, GAU, VirusTotal, waymore+unfurl)
+- **Active Subdomain Discovery**: Bruteforce with puredns, permutation scanning with altdns+shuffledns, DNS enumeration with dnsrecon
+- **DNS Resolution**: Pre-filter with dnsx before HTTP probing (5x speed boost)
+- **Response Filtering**: Extended status codes (200,201,202,204,301,302,303,307,308) + custom ports (80,443,8000,8080,8443,8888)
 - **Technology Detection**: Stack fingerprinting, IP extraction, and CDN detection
+- **DNS Enrichment**: SPF/DMARC records, A/AAAA/CNAME analysis
 
 ### 🎯 Attack Surface Mapping
 - **Port Scanning**: Comprehensive port discovery with naabu + service detection with nmap -sC
 - **Screenshot Capture**: Visual reconnaissance with aquatone or gowitness
-- **Content Discovery**: URL enumeration via waybackurls, gau, katana, waymore
-- **JS Recon**: JavaScript file extraction + secret/API key detection with mantra
+- **Content Discovery**: URL enumeration via waybackurls, gau, katana, waymore with `--providers` + **uro normalization**
+- **Sensitive Files Discovery**: Passive filtering + active dirsearch + ffuf fuzzing with 45+ extensions
+- **JS Recon**: JavaScript file extraction + secret/API key detection with trufflehog, mantra, and regex patterns
 
 ### 🛡️ Security Checks
 - **LeakIX Integration**: Exposure check for misconfigured services & leaked data
 - **Subdomain Takeover**: Detection with subzy, subjack, and nuclei takeover templates
-- **WAF Detection**: Web Application Firewall identification with wafw00f (batched processing) + httpx + header analysis
+- **WAF Detection**: 3-layer detection (httpx + wafw00f + header analysis)
+- **Vulnerability Scanning**: Nuclei + CORS + exposed files checks
 - **Shodan Enrichment**: IP intelligence lookup (requires API key)
+- **IDOR Testing**: Full module with auto-login, session extraction, and A/B/anon comparison
 
 ### 📈 Reporting & UX
-- **Multi-format Reports**: JSON, TXT, HTML, and PDF output
+- **Multi-format Reports**: JSON, TXT, HTML
+- **Scored Findings**: Automatic severity scoring (critical/high/medium)
 - **Verbose Mode**: Real-time terminal output with color-coded results
 - **Smart Cleanup**: Auto-remove empty files & temporary artifacts
 - **Progress Tracking**: Visual progress bars for each phase
 
-### 🔄 Resume & Reliability
-- **Checkpoint System**: `--resume` flag to continue interrupted scans from last completed phase
-- **Auto-Fallback Wordlists**: Automatically downloads `resolvers.txt` and `wordlist` if not found locally
-- **Smart Error Handling**: Cascading error prevention with empty file safeguards
+### 🔄 Reliability
+- **Checkpoint System**: `--resume` flag to continue interrupted scans
+- **Auto-Fallback Wordlists**: Automatically downloads resolvers.txt and wordlists if missing
+- **Quick Probe**: Fast target liveness check (skip dead targets with `--force` to override)
+- **Scope Management**: `--scope-file` for in/out-of-scope rules
+- **Signal Handling**: Ctrl+C skips current phase only (doesn't kill scan)
+
+---
+
+## 🆕 What's New in v2.0
+
+### 🎉 Major Additions
+
+| Feature | Description |
+|---|---|
+| **IDOR Testing Module** | Full standalone IDOR testing with auto-login, session handling, and A vs B vs anon comparison |
+| **Quick Probe (Phase 0)** | Fast pre-scan check to skip dead targets |
+| **DNS Resolution (Phase 4)** | Pre-filter subdomains with dnsx before httpx (5x faster) |
+| **Sensitive Files (Phase 12)** | Passive filtering + active dirsearch + ffuf with 45+ extensions |
+| **Scope Management** | `--scope-file` supports include/exclude patterns |
+| **Extended HTTP Probes** | Ports: 80,443,8000,8080,8443,8888 / Status codes: 200-308 |
+| **uro URL Normalization** | Reduce URL count by 30-70% |
+
+### 🔧 Improvements
+
+- **subfinder -recursive** — discovers deeper subdomains
+- **waymore --providers** — adds wayback, commoncrawl, otx, urlscan sources
+- **waymore + unfurl domains** — extracts subdomains from archived URLs
+- **gau --blacklist** — faster filtering
+- **katana JS extraction** — merges JS files from crawler
+- **jsluice + xnLinkFinder** — deep JS endpoint mining (in IDOR module)
+- **Nuclei optimization** — 3x faster with better rate limiting
+
+### 🐛 Bug Fixes
+
+- **Command injection** — full validation + shlex.quote() everywhere
+- **Session resume** — proper checkpoint with domain tracking
+- **Signal handler** — Ctrl+C now skips only current phase
+- **"Retrying without proxy" false positive** — fixed
+- **KeyError on skipped phases** — safe() helper added
+- **Missing r"..." in shell commands** — fixed
 
 ---
 
 ## 🔧 Requirements
 
 ### 🐍 Python Dependencies
-- `python3 >= 3.8`
-- `reportlab` *(Optional: for PDF reports)*
 
-### 🛠️ External Tools (Install via package manager or Go)
+```bash
+python3 >= 3.8
+```
+
+### 🛠️ External Tools
+
+#### Reconnaissance Tools
 
 | Tool | Purpose | Installation |
-|------|---------|-------------|
-| `subfinder` | Passive subdomain enumeration | `go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest` |
-| `sublist3r` | Subdomain enumeration | `pip install sublist3r` |
-| `chaos` | ProjectDiscovery subdomain DB | `go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest` |
-| `assetfinder` | Subdomain discovery | `go install github.com/tomnomnom/assetfinder@latest` |
-| `github-subdomains` | GitHub subdomain search | `go install github.com/gwen001/github-subdomains@latest` |
-| `findomain` | Fast subdomain finder | [Download releases](https://github.com/Edu4rdSHL/findomain/releases) |
-| `waybackurls` | Archive URL extraction | `go install github.com/tomnomnom/waybackurls@latest` |
-| `gau` | GetAllURLs from archives | `go install github.com/lc/gau/v2/cmd/gau@latest` |
-| `httpx` / `httpx-toolkit` | HTTP probing & tech detection | `go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest` |
-| `naabu` | Fast port scanner | `go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest` |
-| `dnsx` | DNS resolution & probing | `go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest` |
-| `cdncheck` | CDN/WAF detection | `go install -v github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest` |
-| `nmap` | Service/version detection | `sudo apt install nmap` |
-| `puredns` | Accurate subdomain bruteforce | `go install github.com/d3mondev/puredns/v2@latest` |
-| `altdns` | Subdomain permutation generator | `pip install py-altdns` |
-| `shuffledns` | DNS bruteforce wrapper | `go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest` |
-| `dnsrecon` | DNS enumeration suite | `pip install dnsrecon` |
-| `ffuf` | Web fuzzing toolkit | `go install github.com/ffuf/ffuf/v2/cmd/ffuf@latest` |
-| `aquatone` / `gowitness` | Screenshot capture | `go install github.com/michenriksen/aquatone@latest` |
-| `katana` / `waymore` | Advanced crawling | `go install github.com/projectdiscovery/katana/cmd/katana@latest` |
-| `mantra` | JS secret scanner | `go install github.com/brosck/mantra@latest` |
-| `subzy` / `subjack` | Subdomain takeover | `go install github.com/PentestPad/subzy@latest` |
-| `wafw00f` | WAF detection | `pip install wafw00f` |
-| `curl` + `jq` | API interactions | `sudo apt install curl jq` |
-| `proxychains4` *(Optional)* | Route TCP tools via proxy | `sudo apt install proxychains4` |
+|---|---|---|
+| **subfinder** | Passive subdomain enumeration | `go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest` |
+| **sublist3r** | Subdomain enumeration | `pip install sublist3r` |
+| **chaos** | ProjectDiscovery subdomain DB | `go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest` |
+| **assetfinder** | Subdomain discovery | `go install github.com/tomnomnom/assetfinder@latest` |
+| **github-subdomains** | GitHub subdomain search | `go install github.com/gwen001/github-subdomains@latest` |
+| **findomain** | Fast subdomain finder | Download releases |
+| **puredns** | Accurate subdomain bruteforce | `go install github.com/d3mondev/puredns/v2@latest` |
+| **altdns** | Subdomain permutation generator | `pip install py-altdns` |
+| **shuffledns** | DNS bruteforce wrapper | `go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest` |
+| **dnsrecon** | DNS enumeration suite | `pip install dnsrecon` |
+| **dnsx** | DNS resolution & probing | `go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest` |
+| **cdncheck** | CDN/WAF detection | `go install -v github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest` |
 
-> 💡 **Tip**: Most Go tools can be installed with `go install`. Ensure `$GOPATH/bin` is in your `PATH`.
+#### HTTP & Content Discovery
+
+| Tool | Purpose | Installation |
+|---|---|---|
+| **httpx** | HTTP probing & tech detection | `go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest` |
+| **waybackurls** | Archive URL extraction | `go install github.com/tomnomnom/waybackurls@latest` |
+| **gau** | GetAllURLs from archives | `go install github.com/lc/gau/v2/cmd/gau@latest` |
+| **waymore** | Advanced URL mining | `pip install waymore` |
+| **katana** | Advanced crawling | `go install github.com/projectdiscovery/katana/cmd/katana@latest` |
+| **uro** | URL deduplication | `pip install uro` |
+| **unfurl** | URL component extraction | `go install github.com/tomnomnom/unfurl@latest` |
+| **ffuf** | Web fuzzing toolkit | `go install github.com/ffuf/ffuf/v2/cmd/ffuf@latest` |
+| **dirsearch** | Directory brute-forcing | `pip install dirsearch` |
+
+#### Vulnerability Scanning
+
+| Tool | Purpose | Installation |
+|---|---|---|
+| **naabu** | Fast port scanner | `go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest` |
+| **nmap** | Service/version detection | `sudo apt install nmap` |
+| **nuclei** | Vulnerability scanner | `go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest` |
+| **subzy** | Subdomain takeover | `go install github.com/PentestPad/subzy@latest` |
+| **subjack** | Subdomain takeover | `go install github.com/haccer/subjack@latest` |
+| **wafw00f** | WAF detection | `pip install wafw00f` |
+| **trufflehog** | Secret scanner | `go install github.com/trufflesecurity/trufflehog/v3@latest` |
+| **mantra** | JS secret scanner | `go install github.com/brosck/mantra@latest` |
+| **gitleaks** | Git secret scanner | `go install github.com/gitleaks/gitleaks/v8@latest` |
+
+#### Screenshots
+
+| Tool | Purpose | Installation |
+|---|---|---|
+| **aquatone** | Screenshot capture | `go install github.com/michenriksen/aquatone@latest` |
+| **gowitness** | Screenshot capture | `go install github.com/sensepost/gowitness@latest` |
+
+#### Utilities
+
+| Tool | Purpose | Installation |
+|---|---|---|
+| **curl** | HTTP requests | `sudo apt install curl` |
+| **jq** | JSON parsing | `sudo apt install jq` |
+| **dig** | DNS queries | `sudo apt install dnsutils` |
+| **proxychains4** | TCP proxy routing | `sudo apt install proxychains4` |
+
+#### IDOR Module (Optional)
+
+| Tool | Purpose | Installation |
+|---|---|---|
+| **jsluice** | JS URL/secret extraction | `go install github.com/BishopFox/jsluice/cmd/jsluice@latest` |
+| **xnLinkFinder** | JS endpoint mining | `pip install xnLinkFinder` |
 
 ---
 
 ## 📦 Installation
 
 ### 1️⃣ Clone the Repository
+
 ```bash
 git clone https://github.com/darkzone-964/clicker.git
 cd clicker
 ```
 
-### 2️⃣ Install Python Dependencies (Optional)
-```bash
-pip3 install reportlab  # For PDF report generation
-```
+### 2️⃣ Install External Tools
 
-### 3️⃣ Install External Tools
-Use the installation commands from the Requirements section above, or run:
 ```bash
-# Quick install for Kali/Debian users
-sudo apt update && sudo apt install -y nmap curl jq proxychains4
+# Quick install for Kali/Debian
+sudo apt update && sudo apt install -y nmap curl jq dnsutils proxychains4
 
 # Install Go tools (requires Go >= 1.21)
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-# ... (repeat for other tools as needed)
+go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+go install github.com/tomnomnom/unfurl@latest
+go install github.com/trufflesecurity/trufflehog/v3@latest
+# ... install other tools as needed
+
+# Python tools
+pip install sublist3r waymore uro dirsearch wafw00f xnLinkFinder
 ```
 
-### 4️⃣ Make Clicker Executable
+### 3️⃣ Make Executable
+
 ```bash
 chmod +x clicker.py
 ```
@@ -132,51 +225,46 @@ chmod +x clicker.py
 
 ## 🚀 Quick Start
 
-### 🔹 Scan a Single Target
+### Basic Scan
+
 ```bash
-python3 clicker.py -t example.com --verbose
+python3 clicker.py -t example.com -v
 ```
 
-### 🔹 Scan Multiple Targets from File
-```bash
-python3 clicker.py --targets-file targets.txt -v
-```
+### Full Bug Bounty Scan
 
-### 🔹 Generate All Report Formats + PDF
-```bash
-python3 clicker.py -t example.com --report-format both --pdf
-```
-
-### 🔹 Skip Time-Consuming Phases
-```bash
-python3 clicker.py -t example.com --skip-screenshots --skip-js --skip-active-subs
-```
-
-### 🔹 Custom Wordlist & Resolvers
 ```bash
 python3 clicker.py -t example.com \
-  --wordlist /path/to/custom-wordlist.txt \
-  --resolvers /path/to/custom-resolvers.txt
+  --hybrid-proxy \
+  --report-format both \
+  --scope-file scope.txt \
+  -v
 ```
 
-### 🔹 Resume Interrupted Scan
+### Skip Heavy Phases
+
+```bash
+python3 clicker.py -t example.com \
+  --skip-screenshots \
+  --skip-js \
+  --skip-fuzz \
+  --skip-active-subs \
+  -v
+```
+
+### Scan Local Target (e.g., crAPI)
+
+```bash
+python3 clicker.py -t 127.0.0.1.nip.io:8888 \
+  --skip-js \
+  --skip-screenshots \
+  -v
+```
+
+### Resume Interrupted Scan
+
 ```bash
 python3 clicker.py -t example.com --resume -v
-```
-
-### 🔹 Scan with Proxy Support
-```bash
-# Single manual proxy
-python3 clicker.py -t example.com --proxy 1.2.3.4:8080 -v
-
-# Auto-fetch fresh proxies + rotate per target
-python3 clicker.py -t example.com --auto-proxy --rotate-proxy -v
-
-# Hybrid mode: Passive runs direct, Active uses proxy (RECOMMENDED)
-python3 clicker.py -t example.com --hybrid-proxy --auto-proxy --rotate-proxy -v
-
-# Full proxychains routing for ALL tools (including nmap/naabu)
-python3 clicker.py -t example.com --proxychains --proxy 1.2.3.4:8080 -v
 ```
 
 ---
@@ -184,353 +272,398 @@ python3 clicker.py -t example.com --proxychains --proxy 1.2.3.4:8080 -v
 ## ⚙️ Options & Arguments
 
 | Argument | Short | Description | Default |
-|----------|-------|-------------|---------|
-| `--target` | `-t` | Single target domain to scan | *Required if no --targets-file* |
-| `--targets-file` | | File containing one domain per line | *Required if no -t* |
-| `--workspace` | | Output directory for results | `clicker_output` |
-| `--api-file` | | File to store/load API keys | `clicker_api.env` |
-| `--report-format` | | Report format: `txt`, `html`, or `both` | `both` |
-| `--pdf` | | Generate PDF report (requires reportlab) | `False` |
-| `--skip-screenshots` | | Skip screenshot capture phase | `False` |
-| `--skip-js` | | Skip JavaScript reconnaissance phase | `False` |
-| `--skip-active-subs` | | Skip active subdomain enumeration | `False` |
-| `--wordlist` | | Wordlist for active subdomain bruteforce | `/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt` |
-| `--resolvers` | | Resolvers file for DNS queries | `/usr/share/seclists/Discovery/DNS/resolvers.txt` |
-| `--keep-sources` | | Keep intermediate source files (debug mode) | `False` |
-| `--show-phase-results` | | Show summary after each phase completes | `False` |
-| `--verbose` | `-v` | Show full output content in terminal | `False` |
-| `--resume` | | Resume scan from last checkpoint | `False` |
-| `--proxy` | | Single proxy (`user:pass@IP:PORT` or `IP:PORT`) | *None* |
-| `--proxy-list` | | Path to proxy list file (one `IP:PORT` per line) | *None* |
-| `--auto-proxy` | | Fetch fresh proxies from public APIs automatically | `False` |
-| `--rotate-proxy` | | Rotate proxies per target/domain | `False` |
-| `--proxychains` | | Route ALL tools via proxychains (requires `proxychains4`) | `False` |
-| `--hybrid-proxy` | | **Smart mode**: Proxy ONLY for active scanning, Passive runs directly *(RECOMMENDED)* | `False` |
-| `--help` | `-h` | Show help message and exit | - |
+|---|---|---|---|
+| `--target` | `-t` | Single target domain | Required |
+| `--targets-file` | | File with one domain per line | Required |
+| `--scope-file` | | Scope file (include/exclude patterns) | None |
+| `--workspace` | | Output directory | `clicker_output` |
+| `--api-file` | | API keys file | `clicker_api.env` |
+| `--report-format` | | Report format: txt, html, both | both |
+| `--skip-screenshots` | | Skip screenshot phase | False |
+| `--skip-js` | | Skip JS recon phase | False |
+| `--skip-active-subs` | | Skip active subdomain enum | False |
+| `--skip-vuln` | | Skip vulnerability scanning | False |
+| `--skip-fuzz` | | Skip dirsearch/ffuf | False |
+| `--skip-idor` | | Skip IDOR testing | False |
+| `--resume` | | Resume from checkpoint | False |
+| `--force` | | Force scan even if Quick Probe says dead | False |
+| `--wordlist` | | Wordlist for active bruteforce | SecLists default |
+| `--resolvers` | | Resolvers file | SecLists default |
+| `--keep-sources` | | Keep intermediate files | False |
+| `--verbose` | `-v` | Detailed output | False |
+| `--proxy` | | Single proxy | None |
+| `--proxy-list` | | Path to proxy list | None |
+| `--auto-proxy` | | Auto-fetch proxies | False |
+| `--rotate-proxy` | | Rotate per target | False |
+| `--proxychains` | | Route all via proxychains4 | False |
+| `--hybrid-proxy` | | Smart proxy (recommended) | False |
 
 ---
 
 ## 🛡️ Proxy Support
 
-Clicker introduces comprehensive proxy support with intelligent routing:
+### Modes
 
-### 🔹 Proxy Modes
+| Mode | Command | Behavior |
+|---|---|---|
+| **Direct** | (none) | All tools connect directly |
+| **Manual** | `--proxy IP:PORT` | HTTP tools use proxy |
+| **Auto-Fetch** | `--auto-proxy` | Fetch from public APIs |
+| **Rotate** | `--rotate-proxy` | Change proxy per target |
+| **Proxychains** | `--proxychains` | All tools (incl. nmap/naabu) |
+| **Hybrid ⭐** | `--hybrid-proxy` | Passive direct, Active via proxy |
 
-| Mode | Command | Behavior | Best For |
-|------|---------|----------|----------|
-| **Direct** | *(no flags)* | All tools connect directly | Fastest, no anonymity needed |
-| **Manual Proxy** | `--proxy IP:PORT` | HTTP tools use proxy via `HTTP_PROXY` env var | Simple anonymity for HTTP requests |
-| **Auto-Fetch** | `--auto-proxy` | Fetches fresh proxies from public APIs | Testing with rotating free proxies |
-| **Rotate** | `--rotate-proxy` | Changes proxy per target domain | Avoiding rate limits per target |
-| **Proxychains** | `--proxychains` | Wraps ALL commands (including `nmap`, `naabu`) via `proxychains4` | Full TCP/UDP anonymity |
-| **Hybrid** ⭐ | `--hybrid-proxy` | **Passive tools run direct** (fast), **Active tools use proxy** (safe) | **Best balance: speed + anonymity** |
+### Hybrid Mode Logic
 
-### 🔹 How Hybrid Mode Works
-```mermaid
-graph TD
-    A[Start Scan] --> B{Is tool Passive?}
-    B -->|Yes: subfinder, crt.sh, gau...| C[Run DIRECT - No proxy]
-    B -->|No: httpx, naabu, nmap...| D{Is --proxychains set?}
-    D -->|Yes| E[Run via proxychains]
-    D -->|No| F[Run with HTTP_PROXY env var]
-    C --> G[Fast results, no proxy overhead]
-    E --> H[Full anonymity for active scanning]
-    F --> I[HTTP-level anonymity]
+```
+Passive Tools (subfinder, gau, etc.)  → DIRECT (fast)
+Active Tools  (httpx, nuclei, etc.)   → PROXY (anonymous)
+Network Tools (nmap, naabu, dnsx)     → DIRECT (env cleanup)
+If command fails → Auto-retry without proxy
 ```
 
-### 🔹 Proxy Health & Fallback
-- ✅ **Auto health check**: Tests proxy connectivity before each phase
-- ✅ **Smart fallback**: If a command fails with proxy, retries automatically without it
-- ✅ **Environment cleanup**: Removes `HTTP_PROXY` vars for network tools to prevent conflicts
+### Proxy List Format
 
-### 🔹 Example Proxy List Format (`proxies.txt`)
 ```
 185.162.128.45:8080
 user:pass@45.12.34.56:9090
 socks5://127.0.0.1:1080
 ```
 
-> ⚠️ **Warning**: Free public proxies are often slow, unstable, or logged. For professional use, consider paid residential/datacenter proxies.
-
 ---
 
-## 🧠 Smart Features (NEW v1.7.1)
+## 🧠 Smart Features
 
 ### 🔹 Early WAF Detection (Phase 2)
-WAF detection now executes immediately after passive subdomain enumeration, enabling automatic optimization for all subsequent scanning phases.
+
+Runs immediately after passive enumeration, optimizes all subsequent phases.
+
+| WAF Type | httpx Options | naabu Rate |
+|---|---|---|
+| Cloudflare | `-timeout 10 -retries 1` | 100 |
+| Akamai | `-timeout 15 -retries 2` | 80 |
+| Imperva | `-timeout 20 -retries 2` | 50 |
+| Default | `-timeout 10 -retries 1` | 200 |
+
+### 🔹 Three-Layer WAF Detection
 
 ```
-Execution Flow:
-[1] Passive Subdomain Enumeration
-[2] WAF Detection ⭐ ← Now runs here!
-[3] Response Filtering (WAF-optimized)
-[4] Technology Detection (WAF-optimized)
-[5] Port Scanning (WAF-optimized)
-...
+Layer 1: httpx tech detection
+   ↓
+Layer 2: wafw00f (batched)
+   ↓
+Layer 3: Manual header analysis
 ```
 
-### 🔹 Dynamic WAF-Aware Tool Configuration
-Clicker automatically adjusts tool parameters based on detected WAF type:
+### 🔹 Scope Management
 
-| WAF Type | httpx Options | naabu Options | nmap Options |
-|----------|--------------|---------------|-------------|
-| **Cloudflare** | `-timeout 10 -retries 1` | `-rate 100 -timeout 1000` | `-T3 --max-retries 1` |
-| **Akamai** | `-timeout 15 -retries 2` | `-rate 80 -timeout 1500` | `-T3 --host-timeout 15m` |
-| **Imperva** | `-timeout 20 -retries 2` | `-rate 50 -timeout 2000` | `-T2 --max-retries 2` |
-| **Default** | `-timeout 10 -retries 1` | `-rate 200 -timeout 1000` | `-T4 --max-retries 1` |
+Create `scope.txt`:
 
-**Usage**: Fully automatic — no flags needed. Detection results are logged:
 ```
-[*] Detected WAF Type: CLOUDFLARE
-[hybrid] Applying Cloudflare-optimized options...
-```
+# Include patterns
+*.example.com
+example.com
+api.example.com
 
-### 🔹 Three-Layer WAF Detection Engine
-Enhanced accuracy through intelligent fallback chain:
-```
-Layer 1: httpx technology fingerprinting
-   ↓ (if no WAF detected)
-Layer 2: wafw00f with JSON batch processing
-   ↓ (if no WAF detected)
-Layer 3: Manual HTTP header signature analysis
+# Exclude patterns (prefix with !)
+!blog.example.com
+!*.cdn.example.com
 ```
 
-**Supported Signatures**:
-- Cloudflare: `cf-ray`, `cf-cache-status`, `server: cloudflare`
-- Akamai: `akamai-grn`, `x-akamai-transformed`, `edgekey`
-- Imperva: `incap-signal`, `x-cdn`, `server: imperva`
-- AWS: `x-amz-cf-id`, `x-amz-request-id`
-- Sucuri: `x-sucuri-id`, `x-sucuri-cache`
+Run:
 
-### 🔹 Smart Wordlist Selection by Target Type
-Automatic wordlist optimization based on target profile:
+```bash
+python3 clicker.py --targets-file targets.txt --scope-file scope.txt
+```
 
-| Target Profile | Detection Keywords | Wordlist Strategy |
-|---------------|-------------------|------------------|
-| ☁️ Cloud | `aws`, `azure`, `gcp`, `heroku` | Focused cloud-oriented lists |
-| 🏢 Enterprise | `corp`, `enterprise`, `inc`, `ltd` | Comprehensive enterprise lists |
-| 🏛️ Government | `gov`, `government`, `state` | Gov-targeted deep lists |
-| 🛒 E-commerce | `shop`, `store`, `market`, `cart` | Content-rich discovery lists |
-| 🚀 Startup | `app`, `tech`, `io`, `ai`, `labs` | Lightweight agile lists |
+### 🔹 Smart Resume
 
-**Usage**: Automatic — detected from domain name patterns.
-
-### 🔹 Enhanced Resume with State Preservation
-The `--resume` flag now preserves detected WAF type and completion flags:
-```python
+```json
 {
-  "last_phase": "waf",
-  "timestamp": "2024-01-15T10:30:00",
-  "completed": true,
-  "waf_type": "cloudflare"  # ← Preserved for next session
+  "domain": "example.com",
+  "completed_phases": ["quick", "passive", "waf", "active"],
+  "timestamp": "2026-01-15T10:30:00",
+  "extra": {"waf_type": "cloudflare"}
 }
 ```
 
-### 🔹 Interactive Phase Control via Ctrl+C
-Press `Ctrl+C` during any phase to:
-- ⏭️ Skip current phase only
-- ➡️ Automatically continue to next phase
-- 📊 Preserve all completed results
+### 🔹 Ctrl+C Handling
+
+Press Ctrl+C during any phase:
+- ✅ Skips current phase only
+- ✅ Continues to next phase
+- ✅ Preserves all completed results
+
+### 🔹 Quick Probe
+
+Fast target check before full scan:
+- DNS resolution
+- HTTPS/HTTP probe
+- WAF hint from headers
+- Decision: skip if dead (override with `--force`)
+
+---
+
+## 🎯 IDOR Testing Module
+
+### Overview
+
+Standalone IDOR testing module (`idor_module.py`) with:
+- **Discovery**: Extracts candidates from URLs, JS files, API docs, GraphQL
+- **Unauthenticated Scan**: Tests without login first
+- **Auto-Login**: Tries common login patterns
+- **Authenticated Testing**: A vs B vs anon comparison
+
+### Workflow
 
 ```
-[Phase 4: Port Scanning] ████████░░░░ 60%
-[!] Ctrl+C detected — skipping current phase...
-[+] Continuing to Phase 5: Subdomain Takeover Detection
+Phase 16: IDOR Discovery (passive)
+    ├─ Level 1: Extract from URLs
+    ├─ Level 2: JS mining (jsluice)
+    ├─ Level 3: API docs (Swagger/OpenAPI)
+    └─ Level 4: GraphQL endpoints
+        ↓
+Phase 17: Unauthenticated Scan
+    ├─ Test without any auth
+    ├─ Detect missing-auth
+    └─ Method tampering
+        ↓
+Prompt: "Test with authentication? [y/N]"
+        ↓
+Phase 18: Auto-Login (A + B)
+        ↓
+Phase 19: Authenticated Testing
+    └─ A vs B vs anon comparison
 ```
 
-### 🔹 Advanced Hybrid Proxy with Auto-Fallback
-Smart proxy routing with automatic recovery:
+### Interactive Flow
+
+When IDOR phase runs:
+
 ```
-Hybrid Mode Logic:
-├── Passive Tools → Run DIRECT (fast)
-└── Active Tools → Use proxy (anonymous)
-    └── If command fails → Auto-retry WITHOUT proxy
+════════════════════════════════════════════
+  IDOR Discovery Complete
+════════════════════════════════════════════
+  Candidates : 47
+  UUIDs      : 8
+  Parameters : 23
+  API docs   : 2
+  GraphQL    : 0
+
+[?] Continue with AUTHENTICATED testing?
+Requires TWO accounts you own on the target.
+
+  Test with authentication? [y/N]: y
+
+[*] Account A credentials
+  Email: attacker@test.com
+  Password: ****
+
+[*] Account B credentials
+  Email: victim@test.com
+  Password: ****
+
+[+] Both sessions established
+🔥 CONFIRMED IDOR: http://target.com/api/v1/users/1002
 ```
 
-### 🔹 Automatic Fallback Wordlist Download
-Never stall due to missing local files:
-```
-[!] Wordlist not found at /usr/share/seclists/...
-[!] Downloading fallback from SecLists...
-[+] Fallback downloaded successfully — continuing scan
-```
+### Detection Rules
 
-### 🔹 Enhanced Verbose Output with Smart Coloring
-Color-coded terminal feedback in verbose mode:
-- 🟢 `✅` Successful responses `[200]`, `[302]`
-- 🟡 `⚠️` Access issues `[403]`, `[404]`
-- 🔵 `ℹ️` Informational findings
-- ⚪ Clean, structured phase progress tracking
+| A | B | anon | Verdict |
+|---|---|---|---|
+| 200 | 200 | 401/403 | ✅ CONFIRMED (cross-account) |
+| 200 | 403 | 401/403 | ⚠️ SUSPICIOUS (verify ownership) |
+| 200 | 200 | 200 | ⚪ Public resource (not IDOR) |
+| 401/403 | 401/403 | 401/403 | ✅ Protected |
+
+### Playbook Generation
+
+Always generates `PLAYBOOK.md` with:
+- Bypass checklist (25+ techniques)
+- All candidates sorted by likelihood
+- Confirmed findings
+- Manual test steps
 
 ---
 
 ## 📊 Output Structure
+
 ```
 clicker_output/
 ├── example.com/
+│   ├── quick/
+│   │   └── probe.txt                    # Quick probe results
 │   ├── passive/
-│   │   ├── allsubs.txt              # All discovered subdomains (passive)
-│   │   ├── active_subs.txt          # Subdomains found via active scanning
-│   │   ├── allsubs_final.txt        # Merged: passive + active
-│   │   ├── high_value_subs.txt      # Subdomains with sensitive prefixes
-│   │   └── *_subfinder.txt          # Tool-specific outputs
-│   ├── active/
-│   │   ├── alive-final.txt          # Live HTTP hosts (200/302)
-│   │   ├── subs-Tech.txt            # Tech stack + IP info
-│   │   ├── ips.txt                  # Extracted IP addresses
-│   │   ├── open-ports-full.txt      # Formatted port scan results
-│   │   ├── nmap-scripts.txt         # Nmap script scan findings
-│   │   └── success-response.txt     # All responsive hosts
-│   ├── urls/
-│   │   └── final-urls.txt           # Discovered URLs/endpoints
-│   ├── js/
-│   │   ├── jsfiles.txt              # Extracted JavaScript files
-│   │   └── secrets-found.txt        # Potential API keys/secrets
-│   ├── leakix/
-│   │   ├── leakix-ips.txt           # LeakIX IP exposure findings
-│   │   └── leakix-domains.txt       # LeakIX domain exposure findings
-│   ├── takeover/
-│   │   ├── subzy-results.txt        # Subzy takeover results
-│   │   └── subjack-results.json     # Subjack takeover results
+│   │   ├── allsubs.txt                  # All subdomains
+│   │   ├── allsubs_final.txt            # Merged passive+active
+│   │   └── high_value_subs.txt          # Sensitive-prefix subdomains
 │   ├── waf/
-│   │   └── waf-detected.txt         # WAF detection summary
+│   │   └── waf-detected.txt             # Detected WAF type
+│   ├── dns/
+│   │   ├── resolved.txt                 # dnsx resolution
+│   │   ├── dns-resolved.txt             # A/AAAA/CNAME records
+│   │   ├── spf.txt                      # SPF record
+│   │   └── dmarc.txt                    # DMARC record
+│   ├── active/
+│   │   ├── alive.txt                    # Live hosts
+│   │   ├── alive-final.txt              # Final live hosts
+│   │   ├── success-response.txt         # 200/302 hosts
+│   │   ├── 403subs.txt                  # 403 hosts
+│   │   ├── 404subs.txt                  # 404 hosts
+│   │   ├── ips.txt                      # Extracted IPs
+│   │   ├── real-ips.txt                 # Non-CDN IPs
+│   │   └── open-ports-full.txt          # Port scan results
+│   ├── vulns/
+│   │   ├── nuclei-results.txt           # Nuclei findings
+│   │   ├── cors.txt                     # CORS issues
+│   │   └── exposed-files.txt            # Exposed files
+│   ├── leakix/
+│   │   ├── leakix-ips.txt               # IP exposure
+│   │   └── leakix-domains.txt           # Domain exposure
+│   ├── urls/
+│   │   ├── final-urls.txt               # All URLs
+│   │   └── clean_urls.txt               # Filtered URLs
+│   ├── sensitive/
+│   │   ├── sensitive_files_passive.txt  # From URLs
+│   │   ├── dirsearch.json               # Active scan
+│   │   └── ffuf_*.json                  # Fuzzing results
+│   ├── js/
+│   │   ├── jsfiles.txt                  # JS files
+│   │   └── secrets-found.txt            # Secrets
+│   ├── idor/
+│   │   ├── candidates.txt               # IDOR candidates
+│   │   ├── uuids.txt                    # Extracted UUIDs
+│   │   ├── params.txt                   # Parameter names
+│   │   ├── unauth_confirmed.json        # Missing-auth findings
+│   │   ├── auth_confirmed.json          # Cross-account findings
+│   │   └── PLAYBOOK.md                  # Manual playbook
+│   ├── takeover/
+│   │   ├── subzy-results.txt
+│   │   └── subjack-results.json
 │   └── screenshots/
-│       ├── aquatone/                # Aquatone output
-│       └── gowitness/               # Gowitness database
-├── report.json      # Full JSON report
-├── report.txt       # Human-readable TXT report
-├── report.html      # Interactive HTML report
-└── report.pdf       # PDF report (if --pdf used)
+│       ├── aquatone/
+│       └── gowitness/
+├── report.json                          # Full JSON
+├── report.txt                           # Text report
+└── report.html                          # Interactive HTML
 ```
 
 ---
 
 ## 📁 Project Structure
+
 ```
-clicker.py          # Main executable script
-clicker_api.env     # API keys configuration (auto-generated)
-CHANGELOG.md        # Version history & updates
-README.md           # This documentation
+clicker/
+├── clicker.py              # Main executable
+├── idor_module.py          # IDOR testing module (optional)
+├── clicker_api.env         # API keys (auto-generated)
+├── CHANGELOG.md            # Version history
+└── README.md               # This file
 ```
 
 ---
 
 ## 🛠️ API Keys Setup
-Clicker supports optional API integrations for enhanced results. On first run, you'll be prompted to configure:
 
-| Key | Service | Purpose | Get Key |
-|-----|---------|---------|---------|
-| `CHAOS_API_KEY` | Chaos by ProjectDiscovery | Access Chaos subdomain database | [Sign up](https://chaos.projectdiscovery.io/) |
-| `VT_API_KEY` | VirusTotal | Subdomain enumeration via VT API | [Get API key](https://www.virustotal.com/) |
-| `GITHUB_TOKEN` | GitHub | Search GitHub for subdomains | [Create token](https://github.com/settings/tokens) |
-| `SHODAN_API` | Shodan | IP intelligence & exposure data | [Get API key](https://account.shodan.io/) |
-| `LEAKIX_API` | LeakIX | Exposure & misconfiguration checks | [Get API key](https://leakix.net/settings) |
+Optional API integrations for enhanced results:
 
-🔐 **Keys are stored locally in `clicker_api.env` — never share this file.**
+| Key | Service | Purpose |
+|---|---|---|
+| `CHAOS_API_KEY` | Chaos | Subdomain database |
+| `VT_API_KEY` | VirusTotal | Subdomain enum |
+| `GITHUB_TOKEN` | GitHub | Subdomain search |
+| `SHODAN_API` | Shodan | IP intelligence |
+| `LEAKIX_API` | LeakIX | Exposure checks |
 
-To manually edit keys:
-```bash
-nano clicker_api.env
-```
+**Stored in `clicker_api.env`** with `chmod 600`. Never share this file.
 
 ---
 
 ## 🔄 Phases Overview
-Clicker executes 10 sequential phases per target:
 
-| Phase | Name | Output |
-|-------|------|--------|
-| `[1]` | Passive Subdomain Enumeration | `allsubs.txt` |
-| `[2]` | **WAF Detection** ⭐ | `waf-detected.txt` |
-| `[3]` | Response Filtering | `alive-final.txt` |
-| `[4]` | Technology Detection | `subs-Tech.txt` + `ips.txt` |
-| `[5]` | Port Scanning | `open-ports-full.txt` + `nmap-scripts.txt` |
-| `[6]` | Subdomain Takeover Detection | `takeover/subzy-results.txt` |
-| `[7]` | Screenshots | `screenshots/aquatone` or `gowitness/` |
-| `[8]` | Content Discovery | `final-urls.txt` |
-| `[9]` | JS Recon & Secret Discovery | `jsfiles.txt` + `secrets-found.txt` |
-| `[10]` | LeakIX Exposure Check | `leakix-ips.txt` + `leakix-domains.txt` |
+Clicker executes **17 sequential phases** per target:
 
-✅ Each phase auto-cleans empty/temporary files unless `--keep-sources` is used.  
-✅ With `--resume`, completed phases are skipped on re-run.  
-✅ WAF type detected in Phase 2 automatically optimizes Phases 3-5.
+| # | Phase | Description |
+|---|---|---|
+| 0 | Quick Probe | Fast liveness check |
+| 1 | Passive Subdomain Enum | 12+ sources |
+| 2 | WAF Detection | 3-layer detection |
+| 3 | Active Subdomain Enum | puredns + altdns + dnsrecon |
+| 4 | DNS Resolution | Pre-filter with dnsx |
+| 5 | Response Filtering | Extended status codes |
+| 6 | Technology Detection | httpx + IP extraction |
+| 7 | Subdomain Takeover | subzy + subjack + nuclei |
+| 8 | Vulnerability Scanning | nuclei + CORS + exposed |
+| 9 | Port Scanning | naabu + nmap |
+| 10 | LeakIX | Exposure check |
+| 11 | Content Discovery | gau + katana + waymore + uro |
+| 12 | Sensitive Files | dirsearch + ffuf |
+| 13 | JS Recon | trufflehog + mantra |
+| 14 | **IDOR Testing** | Discovery + Auth + A/B/anon |
+| 15 | Screenshots | gowitness + aquatone |
+| 16 | DNS Enrichment | SPF/DMARC check |
 
 ---
 
 ## 📝 Examples
 
-### 🔹 Basic Scan with Verbose Output
+### 1. Basic Scan
+
 ```bash
-python3 clicker.py -t target.com -v
+python3 clicker.py -t example.com -v
 ```
 
-### 🔹 Full Scan with All Reports
+### 2. Bug Bounty with Scope
+
 ```bash
-python3 clicker.py -t target.com --report-format both --pdf --verbose
+python3 clicker.py --targets-file targets.txt \
+  --scope-file scope.txt \
+  --hybrid-proxy --auto-proxy \
+  --report-format both \
+  -v
 ```
 
-### 🔹 Fast Scan (Skip Heavy Phases)
+### 3. Fast Scan (Skip Heavy Phases)
+
 ```bash
-python3 clicker.py -t target.com \
+python3 clicker.py -t example.com \
   --skip-screenshots \
   --skip-js \
+  --skip-fuzz \
   --skip-active-subs \
   --report-format txt
 ```
 
-### 🔹 Hybrid Proxy Scan (RECOMMENDED)
+### 4. IDOR Testing on Local Target
+
 ```bash
-python3 clicker.py -t target.com \
-  --hybrid-proxy \
-  --auto-proxy \
-  --rotate-proxy \
-  --verbose
+python3 clicker.py -t 127.0.0.1.nip.io:8888 \
+  --skip-js --skip-screenshots -v
 ```
 
-### 🔹 Resume Interrupted Scan
+### 5. Resume Interrupted Scan
+
 ```bash
-# After interruption, continue from last phase:
-python3 clicker.py -t target.com --resume -v
+python3 clicker.py -t example.com --resume -v
 ```
 
-### 🔹 Batch Scan from File
-```bash
-# targets.txt contains:
-# example.com
-# test.example.org
-# api.example.net
+### 6. Force Scan on Apparently Dead Target
 
-python3 clicker.py --targets-file targets.txt --verbose
+```bash
+python3 clicker.py -t example.com --force -v
 ```
 
-### 🔹 WAF-Optimized Scan (Automatic)
+### 7. View Reports
+
 ```bash
-# Just run normally — WAF detection happens in Phase 2
-python3 clicker.py -t target.com -v
+# View top findings
+cat clicker_output/report.txt
 
-# Output will show:
-[*] Detected WAF Type: CLOUDFLARE
-[hybrid] Using Cloudflare-optimized httpx options...
-[hybrid] Using Cloudflare-optimized naabu options...
-```
+# Open HTML report
+firefox clicker_output/report.html
 
-### 🔹 Smart Wordlist Selection
-```bash
-# Clicker auto-detects target type and selects optimal wordlist
-python3 clicker.py -t api.cloud.example.com -v
-# Automatically uses cloud-oriented wordlists for "cloud" keyword
-```
-
-### 🔹 View Results in Terminal
-```bash
-# View discovered subdomains
-cat clicker_output/example.com/passive/allsubs_final.txt
-
-# View potential secrets
-cat clicker_output/example.com/js/secrets-found.txt
-
-# View WAF detection summary
-cat clicker_output/example.com/waf/waf-detected.txt
+# View IDOR playbook
+cat clicker_output/example.com/idor/PLAYBOOK.md
 ```
 
 ---
@@ -538,44 +671,56 @@ cat clicker_output/example.com/waf/waf-detected.txt
 ## ⚠️ Disclaimer
 
 ### 🔒 Educational & Authorized Use Only
-- Clicker is designed for **security researchers, penetration testers, and bug bounty hunters**.
-- **Always obtain explicit written permission** before scanning any target you do not own.
-- Unauthorized scanning may violate laws (e.g., CFAA, GDPR, Computer Misuse Act).
-- The authors assume **no liability** for misuse of this tool.
 
-### 🌐 Proxy Usage Notice
-- Using proxies does **not guarantee anonymity**; advanced targets may still detect scanning patterns.
-- Free public proxies may log your traffic — use trusted providers for sensitive engagements.
-- Respect rate limits of APIs and target infrastructure to avoid service disruption.
+Clicker is designed for **security researchers, penetration testers, and bug bounty hunters**.
+
+- **Always** obtain explicit written permission before scanning
+- **Never** scan targets outside your authorized scope
+- **Unauthorized scanning** may violate laws (CFAA, GDPR, CMA, etc.)
+- Authors assume **no liability** for misuse
+
+### 🌐 Proxy & Rate Limiting
+
+- Proxies don't guarantee anonymity
+- Free proxies may log your traffic
+- Respect target infrastructure — avoid DoS
+- Some bug bounty programs **prohibit automated testing** — check rules first
+
+### 🎯 IDOR Testing Notice
+
+The IDOR module sends authenticated requests to compare account responses:
+- **Only use on programs that explicitly allow automation**
+- **Keep audit logs** for legal protection
+- **Never** use on third-party accounts you don't own
+- Rate limiting is enforced (2 req/s default)
 
 ---
 
 ## 🤝 Contributing
-Contributions are welcome! To contribute:
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+2. Create feature branch: `git checkout -b feature/amazing-feature`
+3. Commit changes: `git commit -m 'Add amazing feature'`
+4. Push: `git push origin feature/amazing-feature`
+5. Open Pull Request
 
 ### 🐛 Reporting Issues
-- Use the GitHub Issues tab
-- Include: OS, Python version, command used, and full error output
 
-### 💡 Feature Requests
-- Describe the use case clearly
-- Suggest implementation approach if possible
+Use the GitHub Issues tab with:
+- OS, Python version
+- Command used
+- Full error output
 
 ---
 
 ## 📄 License
-Distributed under the **MIT License**. See `LICENSE` for more information.
+
+Distributed under the **MIT License**. See `LICENSE` for details.
 
 ```
 MIT License
 
-Copyright (c) 2024 Clicker Tool (@403_linux)
+Copyright (c) 2024-2026 Clicker Tool (@403_linux)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -598,7 +743,7 @@ SOFTWARE.
 
 ---
 
-> Made with ❤️ by `@403_linux`  
-> **⭐ Star this repo if you find it useful!**
+**Made with ❤️ by [@403_linux](https://instagram.com/403_linux)**
 
-⬆ [Back to Top](#-clicker---black-box-recon--vulnerability-assessment-pipeline)
+⭐ **Star this repo if you find it useful!**
+```
