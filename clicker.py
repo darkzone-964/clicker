@@ -1,10 +1,34 @@
 #!/usr/bin/env python3
-import argparse, datetime, html, json, os, re, shutil, subprocess, sys, time, random, urllib.request, socket, signal
+"""
+Clicker v2.0 - Black-box Recon & Bug Bounty Pipeline
+Enhanced with fuzzing, sensitive file discovery, and URL normalization.
+"""
+import argparse
+import datetime
+import html
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
 
-R,G,Y,B,M,C,W,DIM,RST,BOLD = "\033[91m","\033[92m","\033[93m","\033[94m","\033[95m","\033[96m","\033[97m","\033[2m","\033[0m","\033[1m"
-AUTHOR,VERSION,INSTAGRAM = "Clicker Tool","v1.3","@403_linux"
+# ============================================================================
+# COLORS & BRANDING
+# ============================================================================
+R, G, Y, B, M, C, W = "\033[91m", "\033[92m", "\033[93m", "\033[94m", "\033[95m", "\033[96m", "\033[97m"
+DIM, RST, BOLD = "\033[2m", "\033[0m", "\033[1m"
+
+AUTHOR, VERSION, INSTAGRAM = "Clicker Tool", "v2.2", "@403_linux"
 
 ASCII_ART = r"""
 .__  .__        __                 
@@ -16,1030 +40,2526 @@ _/ ___\|  | |  |/ ___\|  |/ // __ \_  __ \
 """
 ASCII_LOGO = f"{C}{ASCII_ART}{RST}{DIM}Black-box Recon Pipeline | {BOLD}{C}{AUTHOR}{RST} {DIM}| {Y}{INSTAGRAM}{RST}"
 
-SENSITIVE_PREFIXES = ["app","dashboard","api","auth","admin","dev","staging","test","internal","vpn","mail","ftp","sandbox","uat","qa","jenkins","gitlab","payment","portal","secure","beta","demo","prod","mgmt","manage","login","sso","id","oauth","backup","old","legacy","corp","intranet","remote","access","cloud","db","database","secret","private","hidden"]
-PORTS_FULL = ",".join(["21","22","23","25","53","80","110","111","135","139","143","389","443","445","993","995","1433","1521","2181","2375","2376","3000","3001","3306","3389","4848","4999","5000","5432","5601","5900","5984","6379","6443","7001","7077","7474","8000","8080","8081","8082","8083","8085","8088","8089","8090","8091","8092","8095","8096","8097","8098","8099","8161","8443","8444","8500","8600","8686","8765","8800","8848","8880","8888","8983","9000","9001","9002","9090","9091","9092","9093","9094","9095","9096","9100","9200","9300","9418","9999","10000","10250","10255","11211","15672","16686","27017","28017","50000","50070","50090","61616"])
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+SENSITIVE_PREFIXES = [
+    "app", "dashboard", "api", "auth", "admin", "dev", "staging", "test",
+    "internal", "vpn", "mail", "ftp", "sandbox", "uat", "qa", "jenkins",
+    "gitlab", "payment", "portal", "secure", "beta", "demo", "prod", "mgmt",
+    "manage", "login", "sso", "id", "oauth", "backup", "old", "legacy",
+    "corp", "intranet", "remote", "access", "cloud", "db", "database",
+    "secret", "private", "hidden"
+]
 
-args_show_results,args_verbose_output,args_skip_active_subs,args_resume = False,False,False,False
-args_wordlist = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt"
-args_resolvers = "/usr/share/seclists/Discovery/DNS/resolvers.txt"
-api_keys_global = {}
-RESUME_FILE = None
-GLOBAL_USE_PROXYCHAINS = False
-GLOBAL_HYBRID_PROXY = False
-GLOBAL_PROXY_HEALTH_OK = True
-SKIP_CURRENT_PHASE = False
-GLOBAL_WAF_TYPE = "default"
+PORTS_COMMON = "21,22,23,25,53,80,110,135,139,143,389,443,445,993,995,1433,1521,2181,2375,3000,3306,3389,5000,5432,5601,5900,5984,6379,6443,7001,8000,8080,8081,8082,8083,8088,8089,8090,8443,8500,8888,8983,9000,9001,9090,9091,9100,9200,9300,9418,9999,10000,10250,11211,15672,16686,27017,50000,50070,61616"
 
-SMART_WORDLISTS = {
-    "default": ["/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt", "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"],
-    "cloud": ["/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt", "/usr/share/seclists/Discovery/DNS/names_from_dnsdb.txt"],
-    "enterprise": ["/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt", "/usr/share/seclists/Discovery/DNS/deepmagic.com-prefixes-top50000.txt"],
-    "startup": ["/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"],
-    "gov": ["/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt", "/usr/share/seclists/Discovery/DNS/deepmagic.com-prefixes-top100000.txt"],
-    "ecommerce": ["/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt", "/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt"]
-}
+# Ports for httpx probing (matches recon file)
+HTTPX_PORTS = "80,443,8080,8443,8000,8888"
+
+# Extended HTTP status codes for alive detection (matches recon file)
+HTTPX_STATUS_CODES = "200,201,202,204,301,302,303,307,308"
 
 WAF_TOOL_OPTIONS = {
     "cloudflare": {"httpx": "-timeout 10 -retries 1", "naabu": "-rate 100 -timeout 1000", "nmap": "-T3 --max-retries 1"},
-    "akamai": {"httpx": "-timeout 15 -retries 2", "naabu": "-rate 80 -timeout 1500", "nmap": "-T3 --host-timeout 15m"},
-    "imperva": {"httpx": "-timeout 20 -retries 2", "naabu": "-rate 50 -timeout 2000", "nmap": "-T2 --max-retries 2"},
-    "default": {"httpx": "-timeout 10 -retries 1", "naabu": "-rate 200 -timeout 1000", "nmap": "-T4 --max-retries 1"}
+    "akamai":     {"httpx": "-timeout 15 -retries 2", "naabu": "-rate 80 -timeout 1500", "nmap": "-T3 --host-timeout 15m"},
+    "imperva":    {"httpx": "-timeout 20 -retries 2", "naabu": "-rate 50 -timeout 2000", "nmap": "-T2 --max-retries 2"},
+    "default":    {"httpx": "-timeout 10 -retries 1", "naabu": "-rate 200 -timeout 1000", "nmap": "-T4 --max-retries 1"},
 }
 
 HTTP_PROXY_TOOLS = {
-    "subfinder", "sublist3r", "chaos", "assetfinder", "github-subdomains", "findomain",
-    "waybackurls", "gau", "httpx", "httpx-toolkit", "curl", "katana", "waymore",
-    "mantra", "subzy", "subjack", "wafw00f", "ffuf", "nuclei", "locate", "whatweb"
+    "subfinder", "sublist3r", "chaos", "assetfinder", "github-subdomains",
+    "findomain", "waybackurls", "gau", "httpx", "httpx-toolkit", "curl",
+    "katana", "waymore", "mantra", "subzy", "subjack", "wafw00f", "ffuf",
+    "nuclei", "whatweb", "uro", "dirsearch"
 }
 NO_PROXY_TOOLS = {
-    "nmap", "naabu", "dnsx", "cdncheck", "puredns", "altdns", "shuffledns", "dnsrecon",
-    "aquatone", "gowitness"
+    "nmap", "naabu", "dnsx", "cdncheck", "puredns", "altdns", "shuffledns",
+    "dnsrecon", "aquatone", "gowitness", "dig", "host"
 }
 FALLBACK_URLS = {
     "resolvers": "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt",
-    "wordlist": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-110000.txt"
+    "wordlist": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-20000.txt",
+    "dirsearch_wordlist": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/directory-list-2.3-medium.txt",
 }
 
+# Active probing paths
+EXPOSED_FILE_PATHS = [
+    "/.env", "/.env.local", "/.env.dev", "/.env.prod", "/.env.backup",
+    "/.env.old", "/.env.bak", "/.env.save", "/.env.orig",
+    "/.git/HEAD", "/.git/config", "/.gitignore", "/.gitconfig",
+    "/.svn/entries", "/.hg/store", "/.DS_Store", "/.htaccess", "/.htpasswd",
+    "/backup.zip", "/backup.tar.gz", "/backup.tar", "/backup.rar", "/backup.7z",
+    "/backup.sql", "/backup.db", "/dump.sql", "/database.sql", "/db.sql",
+    "/config.php.bak", "/config.old", "/config.save", "/config.orig",
+    "/wp-config.php.bak", "/web.config.old", "/phpinfo.php",
+    "/server-status", "/server-info", "/.well-known/security.txt",
+    "/composer.json", "/package.json", "/.dockerignore", "/Dockerfile",
+    "/id_rsa", "/id_rsa.pub", "/.ssh/id_rsa", "/private.key",
+]
+
+# Passive sensitive file extensions (from recon file)
+SENSITIVE_EXTENSIONS = (
+    r"\.(env|ini|conf|config|cfg|yml|yaml|sql|db|sqlite|sqlite3|bak|backup|"
+    r"old|log|txt|csv|xml|json|key|pem|pub|rsa|sh|bash|dump|save|orig|copy)"
+    r"(\?|$)"
+)
+
+# File extensions for dirsearch / ffuf fuzzing (from recon file)
+FUZZ_EXTENSIONS = "env,env.local,env.dev,env.prod,env.backup,env.old,env.bak,git,gitignore,gitconfig,svn,zip,tar,tar.gz,rar,7z,bak,old,backup,save,orig,copy,sql,sqlite,sqlite3,db,json,csv,xml,log,txt,php,js,yml,yaml,ini,cfg,config,key,pem,pub,rsa,sh,bash"
+
+# Filter pattern for URL discovery (media files)
+URL_FILTER_PATTERN = r"\.(jpg|jpeg|png|gif|svg|ico|webp|bmp|mp4|avi|mov|wmv|flv|webm|mkv|mp3|wav|ogg|css|woff|woff2|ttf|eot|otf|pdf|zip|tar|gz|map)(\?|$)"
+
+# ============================================================================
+# GLOBAL STATE
+# ============================================================================
+args_verbose = False
+args_skip_screenshots = False
+args_skip_js = False
+args_skip_active_subs = False
+args_skip_vuln = False
+args_skip_fuzz = False
+args_keep_sources = False
+args_resume = False
+args_force = False
+args_wordlist = ""
+args_resolvers = ""
+args_scope_file = None
+api_keys_global = {}
+workspace_global = None
+GLOBAL_USE_PROXYCHAINS = False
+GLOBAL_HYBRID_PROXY = False
+GLOBAL_PROXY_HEALTH_OK = True
+GLOBAL_WAF_TYPE = "default"
+SKIP_CURRENT_PHASE = False
+
+# ============================================================================
+# VALIDATION
+# ============================================================================
+DOMAIN_RE = re.compile(r'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$')
+IP_RE = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
+
+def validate_domain(d):
+    if not d:
+        raise ValueError("empty domain")
+    d = d.strip().lower()
+    if "://" in d:
+        d = urlparse(d).hostname or ""
+    d = d.strip(".")
+    if not d or not DOMAIN_RE.match(d):
+        raise ValueError(f"invalid domain: {d!r}")
+    return d
+
+def validate_ip(ip):
+    return bool(IP_RE.match(ip.strip()))
+
+# ============================================================================
+# SHELL & IO HELPERS
+# ============================================================================
+def q(s):
+    return shlex.quote(str(s))
+
+def mkd(p):
+    Path(p).mkdir(parents=True, exist_ok=True)
+
+def rlines(path):
+    p = Path(path)
+    if not p.exists():
+        return []
+    try:
+        return [l.strip() for l in p.read_text(encoding="utf-8", errors="ignore").splitlines() if l.strip()]
+    except Exception:
+        return []
+
+def wlines(path, lines, auto_cleanup=True):
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    uniq = sorted(set(l.strip() for l in lines if l and l.strip()))
+    p.write_text("\n".join(uniq) + ("\n" if uniq else ""), encoding="utf-8")
+    if auto_cleanup:
+        cleanup_empty_file(p)
+
+def is_file_empty(path):
+    p = Path(path)
+    if not p.exists():
+        return True
+    try:
+        return len(p.read_text(encoding="utf-8", errors="ignore").strip()) == 0
+    except Exception:
+        return True
+
+def cleanup_empty_file(path, label=""):
+    p = Path(path)
+    if is_file_empty(p) and p.exists():
+        try:
+            p.unlink()
+            if args_verbose:
+                tag = f" ({label})" if label else ""
+                print(f"  {Y}[!]{RST} {DIM}{p.name}{tag} empty → deleted{RST}")
+            return True
+        except Exception:
+            pass
+    return False
+
+def cleanup_after_merge(sources, label="source"):
+    for s in sources:
+        s = Path(s)
+        if s.exists():
+            try:
+                s.unlink()
+                if args_verbose:
+                    print(f"  {Y}[!]{RST} {DIM}{s.name} ({label}) merged → deleted{RST}")
+            except Exception:
+                pass
+
+def show_file_content(path, label, max_lines=40):
+    p = Path(path)
+    if not p.exists() or is_file_empty(p):
+        return
+    lines = rlines(p)
+    print(f"\n{BOLD}{C}📄 {label} ({len(lines)} lines){RST}")
+    print(f"{DIM}{'─' * 70}{RST}")
+    for i, line in enumerate(lines[:max_lines], 1):
+        if "[200]" in line or "[302]" in line:
+            print(f"  {G}{i:3d}{RST} {line}")
+        elif "[403]" in line or "[404]" in line:
+            print(f"  {Y}{i:3d}{RST} {line}")
+        elif "VULNERABLE" in line or "CVE-" in line or "EXPOSED" in line:
+            print(f"  {R}{i:3d}{RST} {BOLD}{line}{RST}")
+        else:
+            print(f"  {DIM}{i:3d}{RST} {line}")
+    if len(lines) > max_lines:
+        print(f"  {DIM}... and {len(lines) - max_lines} more{RST}")
+    print(f"{DIM}{'─' * 70}{RST}\n")
+
+def installed(tool):
+    return shutil.which(tool) is not None
+
+def cleanup_sub(v, domain):
+    if not v:
+        return None
+    v = v.strip().lower().replace("*.", "")
+    if "://" in v:
+        v = urlparse(v).hostname or ""
+    v = v.split("/")[0].split(":")[0].split(",")[0].strip(".")
+    if not v:
+        return None
+    if v == domain or v.endswith("." + domain):
+        if DOMAIN_RE.match(v):
+            return v
+    return None
+
+def extract_hosts_from_urls(lines, domain):
+    out = set()
+    for l in lines:
+        try:
+            h = urlparse(l.strip()).hostname
+        except Exception:
+            h = None
+        c = cleanup_sub(h or "", domain)
+        if c:
+            out.add(c)
+    return out
+
+# ============================================================================
+# LOGGER
+# ============================================================================
+def log_info(msg):    print(f"{C}[*]{RST} {msg}")
+def log_ok(msg):      print(f"{G}[+]{RST} {msg}")
+def log_warn(msg):    print(f"{Y}[!]{RST} {msg}")
+def log_err(msg):     print(f"{R}[✘]{RST} {msg}")
+def log_dim(msg):     print(f"{DIM}{msg}{RST}")
+# ============================================================================
+# PROXY MANAGER
+# ============================================================================
 class ProxyManager:
     def __init__(self, proxy=None, proxy_file=None, auto_fetch=False, rotate=False):
-        self.proxies, self.current_idx, self.rotate = [], 0, rotate
+        self.proxies = []
+        self.current_idx = 0
+        self.rotate = rotate
         self.load(proxy, proxy_file, auto_fetch)
+
     def load(self, proxy, proxy_file, auto_fetch):
         raw = []
         if auto_fetch:
-            print(f"{C}[*] Fetching fresh proxies from public API...{RST}")
-            try:
-                for url in ["https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all", "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"]:
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=10) as res: raw.extend(res.read().decode().splitlines())
-                print(f"{G}[+] Fetched {len(raw)} raw proxies. Validating...{RST}")
-            except Exception as e: print(f"{Y}[!] Proxy fetch failed: {e}{RST}")
+            log_info("Fetching fresh proxies from public APIs...")
+            for url in [
+                "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all",
+                "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
+            ]:
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=10) as res:
+                        raw.extend(res.read().decode(errors="ignore").splitlines())
+                except Exception as e:
+                    log_warn(f"Proxy fetch failed: {e}")
         if proxy_file and os.path.isfile(proxy_file):
-            with open(proxy_file) as f: raw.extend(f.read().splitlines())
-        if proxy: raw.append(proxy)
-        pattern = re.compile(r'^(?:[^@]+@)?(\d{1,3}\.){3}\d{1,3}:\d{2,5}$')
-        self.proxies = list(set([p.strip() for p in raw if pattern.match(p.strip())]))
-        if not self.proxies: print(f"{Y}[!] No valid proxies loaded. Running without proxy.{RST}")
-        else: print(f"{G}[+] Loaded {len(self.proxies)} valid proxy(ies).{RST}")
+            try:
+                raw.extend(Path(proxy_file).read_text(errors="ignore").splitlines())
+            except Exception:
+                pass
+        if proxy:
+            raw.append(proxy)
+
+        pattern = re.compile(r'^(?:[^@\s]+@)?(\d{1,3}\.){3}\d{1,3}:\d{2,5}$')
+        self.proxies = sorted(set(p.strip() for p in raw if pattern.match(p.strip())))
+        if not self.proxies:
+            log_warn("No valid proxies loaded - running without proxy")
+        else:
+            log_ok(f"Loaded {len(self.proxies)} valid proxy(ies)")
+
     def get_current(self):
-        if not self.proxies: return None
+        if not self.proxies:
+            return None
         if self.rotate:
-            proxy = self.proxies[self.current_idx]
+            p = self.proxies[self.current_idx]
             self.current_idx = (self.current_idx + 1) % len(self.proxies)
-            return proxy
+            return p
         return self.proxies[0]
+
     def apply(self, domain=None):
         proxy = self.get_current()
+        for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            os.environ.pop(k, None)
         if not proxy:
-            for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']: os.environ.pop(k, None)
             return
-        if domain: print(f"{DIM}↻ Rotating proxy: {proxy} for {domain}{RST}")
-        proxy_url = proxy if any(proxy.startswith(p) for p in ["http://", "https://", "socks4://", "socks5://"]) else f"http://{proxy}"
-        for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']: os.environ[k] = proxy_url
-
-def signal_handler(sig, frame):
-    global SKIP_CURRENT_PHASE
-    print(f"\n{Y}[!] Ctrl+C detected — skipping current phase...{RST}")
-    SKIP_CURRENT_PHASE = True
-    raise KeyboardInterrupt
+        if domain:
+            print(f"{DIM}↻ Proxy: {proxy} for {domain}{RST}")
+        proxy_url = proxy if "://" in proxy else f"http://{proxy}"
+        for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            os.environ[k] = proxy_url
 
 def check_proxy_health(proxy, timeout=8):
-    if not proxy: return False
+    if not proxy:
+        return False
     try:
-        proxy_url = proxy if any(proxy.startswith(p) for p in ["http://", "https://", "socks4://", "socks5://"]) else f"http://{proxy}"
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url}))
-        opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
-        with opener.open("https://httpbin.org/ip", timeout=timeout) as res: return res.status == 200
-    except: return False
+        proxy_url = proxy if "://" in proxy else f"http://{proxy}"
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        )
+        opener.addheaders = [("User-Agent", "Mozilla/5.0")]
+        with opener.open("https://httpbin.org/ip", timeout=timeout) as res:
+            return res.status == 200
+    except Exception:
+        return False
 
-def detect_target_type(domain):
-    domain_lower = domain.lower()
-    if any(kw in domain_lower for kw in ["cloud", "aws", "azure", "gcp", "digitalocean", "heroku"]): return "cloud"
-    elif any(kw in domain_lower for kw in ["corp", "enterprise", "company", "inc", "ltd", "group"]): return "enterprise"
-    elif any(kw in domain_lower for kw in ["gov", "government", "state", "municipal", "public"]): return "gov"
-    elif any(kw in domain_lower for kw in ["shop", "store", "ecommerce", "market", "buy", "cart"]): return "ecommerce"
-    elif any(kw in domain_lower for kw in ["startup", "app", "tech", "io", "ai", "labs"]): return "startup"
-    return "default"
-
-def get_smart_wordlist(domain, preferred=None):
-    target_type = detect_target_type(domain)
-    candidates = SMART_WORDLISTS.get(target_type, SMART_WORDLISTS["default"])
-    if preferred and preferred in candidates: candidates = [preferred] + [c for c in candidates if c != preferred]
-    for wl in candidates:
-        if Path(wl).exists(): return Path(wl)
-    return ensure_essential_file("wordlist", Path(candidates[0]))
-
-def detect_waf(domain, workspace):
-    waf_file = workspace/domain/"passive"/"waf-detected.txt"
-    if waf_file.exists() and not is_file_empty(waf_file):
-        content = waf_file.read_text().lower()
-        if "cloudflare" in content: return "cloudflare"
-        elif "akamai" in content: return "akamai"
-        elif "imperva" in content or "incapsula" in content: return "imperva"
-    return GLOBAL_WAF_TYPE
-
-def get_tool_options(tool_name, waf_type):
-    waf_opts = WAF_TOOL_OPTIONS.get(waf_type, WAF_TOOL_OPTIONS["default"])
-    return waf_opts.get(tool_name, "")
-
-def ensure_essential_file(file_type, path):
-    if Path(path).exists(): return path
-    fallback_dir = Path.home() / ".clicker" / "wordlists"; fallback_dir.mkdir(parents=True, exist_ok=True)
-    url = FALLBACK_URLS.get(file_type)
-    if not url: return None
-    fallback_path = fallback_dir / f"{file_type}.txt"
-    if fallback_path.exists(): print(f"{G}[+] Using cached {file_type}: {fallback_path}{RST}"); return fallback_path
-    print(f"{Y}[!] {file_type} not found — downloading fallback...{RST}")
-    try:
-        with urllib.request.urlopen(url, timeout=60) as res: content = res.read().decode(); fallback_path.write_text(content, encoding="utf-8")
-        print(f"{G}[+] Downloaded {file_type} to {fallback_path}{RST}"); return fallback_path
-    except Exception as e: print(f"{R}[!] Failed to download {file_type}: {e}{RST}"); return None
-
+# ============================================================================
+# COMMAND RUNNER
+# ============================================================================
 def run_cmd(cmd, timeout=600, tool_name=None, allow_fallback=True):
-    global GLOBAL_HYBRID_PROXY, GLOBAL_USE_PROXYCHAINS, GLOBAL_PROXY_HEALTH_OK, SKIP_CURRENT_PHASE
-    if SKIP_CURRENT_PHASE: SKIP_CURRENT_PHASE = False; return (0, "", "")
+    global GLOBAL_PROXY_HEALTH_OK, SKIP_CURRENT_PHASE
+    if SKIP_CURRENT_PHASE:
+        SKIP_CURRENT_PHASE = False
+        return (0, "", "")
+
+    has_proxy = bool(os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy"))
+
     use_proxy = True
     if GLOBAL_HYBRID_PROXY and tool_name:
         if tool_name in NO_PROXY_TOOLS:
             use_proxy = False
-            for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']: os.environ.pop(k, None)
-            if args_verbose_output: print(f"{DIM}[hybrid] Cleaned env + bypassed proxy for {tool_name}{RST}")
-        elif tool_name not in HTTP_PROXY_TOOLS: use_proxy = False
-    if use_proxy and GLOBAL_HYBRID_PROXY:
-        current_proxy = os.environ.get('HTTP_PROXY', '').replace('http://', '')
-        if current_proxy and not GLOBAL_PROXY_HEALTH_OK:
-            if not check_proxy_health(current_proxy, timeout=5):
-                if args_verbose_output: print(f"{Y}[!] Proxy health check failed — temporarily bypassing{RST}"); use_proxy = False
-            else: GLOBAL_PROXY_HEALTH_OK = True
+            for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+                os.environ.pop(k, None)
+        elif tool_name not in HTTP_PROXY_TOOLS:
+            use_proxy = False
+
+    if use_proxy and GLOBAL_HYBRID_PROXY and not GLOBAL_PROXY_HEALTH_OK:
+        cur = os.environ.get("HTTP_PROXY", "").replace("http://", "")
+        if cur and not check_proxy_health(cur, timeout=5):
+            use_proxy = False
+        else:
+            GLOBAL_PROXY_HEALTH_OK = True
+
     final_cmd = cmd
     if use_proxy and GLOBAL_USE_PROXYCHAINS:
-        pc_bin = shutil.which("proxychains4") or shutil.which("proxychains")
-        if pc_bin: final_cmd = f"{pc_bin} -q {cmd}"
+        pc = shutil.which("proxychains4") or shutil.which("proxychains")
+        if pc:
+            final_cmd = f"{pc} -q {cmd}"
+
     try:
-        p = subprocess.run(final_cmd, shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+        p = subprocess.run(
+            final_cmd, shell=True, check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=timeout
+        )
         result = (p.returncode, p.stdout.strip(), p.stderr.strip())
-        if allow_fallback and use_proxy and (p.returncode != 0 or not p.stdout.strip()):
-            if args_verbose_output: print(f"{Y}[!] Command failed/empty with proxy — retrying without proxy{RST}")
-            saved_env = {k: os.environ.get(k) for k in ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy']}
-            for k in saved_env: os.environ.pop(k, None)
-            p_retry = subprocess.run(cmd, shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
-            for k, v in saved_env.items():
-                if v: os.environ[k] = v
-                else: os.environ.pop(k, None)
-            if p_retry.returncode == 0 and p_retry.stdout.strip():
-                if args_verbose_output: print(f"{G}[+] Fallback succeeded without proxy{RST}"); return (p_retry.returncode, p_retry.stdout.strip(), p_retry.stderr.strip())
+
+        if allow_fallback and use_proxy and has_proxy and (p.returncode != 0 or not p.stdout.strip()):
+            if args_verbose:
+                log_warn(f"Retrying {tool_name or 'cmd'} without proxy")
+            saved = {k: os.environ.get(k) for k in
+                     ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")}
+            for k in saved:
+                os.environ.pop(k, None)
+            try:
+                p2 = subprocess.run(
+                    cmd, shell=True, check=False,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=timeout
+                )
+            finally:
+                for k, v in saved.items():
+                    if v:
+                        os.environ[k] = v
+                    else:
+                        os.environ.pop(k, None)
+            if p2.returncode == 0 and p2.stdout.strip():
+                return (p2.returncode, p2.stdout.strip(), p2.stderr.strip())
         return result
-    except subprocess.TimeoutExpired: return (124, "", f"timeout after {timeout}s")
-    except KeyboardInterrupt: SKIP_CURRENT_PHASE = False; return (0, "", "")
+    except subprocess.TimeoutExpired:
+        return (124, "", f"timeout after {timeout}s")
+    except KeyboardInterrupt:
+        SKIP_CURRENT_PHASE = False
+        return (0, "", "")
+    except Exception as e:
+        return (1, "", str(e))
 
-def installed(tool): return shutil.which(tool) is not None
-def mkd(p): p.mkdir(parents=True,exist_ok=True)
-def wlines(path,lines,auto_cleanup=True):
-    with path.open("w",encoding="utf-8") as f:
-        for l in sorted(set(lines)):
-            if l.strip(): f.write(l.strip()+"\n")
-    if not path.exists(): path.touch()
-    if auto_cleanup: cleanup_empty_file(path)
-def rlines(path):
-    if not path.exists(): return []
-    return [l.strip() for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-def clean_sub(val,domain):
-    if not val: return None
-    v = val.strip().lower().replace("*.","").split(",")[0].strip().split(":")[0]
-    if v.startswith("http://") or v.startswith("https://"): v = urlparse(v).hostname or ""
-    v = v.strip(".")
-    if not v: return None
-    if (v==domain or v.endswith("."+domain)) and re.match(r"^[a-z0-9.-]+$",v): return v
-    return None
-def extract_hosts_from_urls(lines,domain):
-    out=set()
-    for l in lines:
-        h=urlparse(l.strip()).hostname; c=clean_sub(h or "",domain)
-        if c: out.add(c)
-    return out
-def is_file_empty(path):
-    if not path.exists(): return True
-    try: return len(path.read_text(encoding="utf-8").strip())==0
-    except: return True
-def cleanup_empty_file(path,label=""):
-    if is_file_empty(path):
-        try:
-            label_str=f" ({label})" if label else ""
-            print(f"  {Y}[!]{RST} {DIM}{path.name}{label_str} {R}[empty — deleted]{RST}")
-            path.unlink(missing_ok=True); return True
-        except: pass
-    return False
-def cleanup_source_files_after_merge(source_files,label="source"):
-    for src in source_files:
-        if src.exists():
-            try: src.unlink(); print(f"  {Y}[!]{RST} {DIM}{src.name}{RST} {R}[{label} — merged → deleted]{RST}")
-            except: pass
-def show_file_content(file_path,label,max_lines=50):
-    if not file_path.exists() or is_file_empty(file_path): return
-    lines=rlines(file_path)
-    print(f"\n{BOLD}{C}📄 {label} ({len(lines)} lines){RST}\n{DIM}{'─'*70}{RST}")
-    for i,line in enumerate(lines[:max_lines],1):
-        if '[200]' in line or '✓' in line or '→ http' in line: print(f"  {G}{i:3d}{RST} {line}")
-        elif '[403]' in line or '[404]' in line: print(f"  {Y}{i:3d}{RST} {line}")
-        elif 'VULNERABLE' in line or 'CVE-' in line: print(f"  {R}{i:3d}{RST} {BOLD}{line}{RST}")
-        else: print(f"  {DIM}{i:3d}{RST} {line}")
-    if len(lines)>max_lines: print(f"  {DIM}... and {len(lines)-max_lines} more{RST}")
-    print(f"{DIM}{'─'*70}{RST}\n")
-
+# ============================================================================
+# PHASE PROGRESS
+# ============================================================================
 class PhaseProgress:
-    def __init__(self,name,total): self.name,self.total,self.done,self.start=name,total,0,time.time(); self._print_header()
-    def _print_header(self): print(f"\n{BOLD}{B}{'═'*60}{RST}\n{BOLD}{C}  Phase: {self.name}{RST}\n{BOLD}{B}{'═'*60}{RST}")
-    def step(self,label):
+    def __init__(self, name, total):
+        self.name, self.total, self.done, self.start = name, total, 0, time.time()
+        print(f"\n{BOLD}{B}{'═' * 60}{RST}")
+        print(f"{BOLD}{C}  Phase: {name}{RST}")
+        print(f"{BOLD}{B}{'═' * 60}{RST}")
+
+    def step(self, label):
         global SKIP_CURRENT_PHASE
-        if SKIP_CURRENT_PHASE: SKIP_CURRENT_PHASE = False; raise KeyboardInterrupt
-        self.done+=1; pct=int(self.done/self.total*100); bar=int(pct/4)
-        elapsed=time.time()-self.start; eta=(elapsed/self.done)*(self.total-self.done) if self.done>0 else 0
-        print(f"  {G}{'█'*bar}{RST}{DIM}{'░'*(25-bar)}{RST} {BOLD}{pct:3d}%{RST} {Y}[{self.done}/{self.total}]{RST} {DIM}elapsed {elapsed:.0f}s{RST} {W}{label}{RST}")
-    def done_phase(self): print(f"\n  {G}✔ Phase complete in {time.time()-self.start:.1f}s{RST}\n")
+        if SKIP_CURRENT_PHASE:
+            SKIP_CURRENT_PHASE = False
+            raise KeyboardInterrupt
+        self.done += 1
+        pct = int(self.done / self.total * 100)
+        bar = int(pct / 4)
+        elapsed = time.time() - self.start
+        print(f"  {G}{'█' * bar}{RST}{DIM}{'░' * (25 - bar)}{RST} "
+              f"{BOLD}{pct:3d}%{RST} {Y}[{self.done}/{self.total}]{RST} "
+              f"{DIM}{elapsed:.0f}s{RST} {W}{label}{RST}")
 
-def save_checkpoint(phase_name):
-    global RESUME_FILE
-    if RESUME_FILE: RESUME_FILE.write_text(json.dumps({"last_phase": phase_name, "timestamp": datetime.datetime.now().isoformat(), "completed": True}), encoding="utf-8")
-def load_checkpoint():
-    global RESUME_FILE
-    if RESUME_FILE and RESUME_FILE.exists():
-        try: return json.loads(RESUME_FILE.read_text())
-        except: pass
-    return {}
+    def done_phase(self):
+        print(f"\n  {G}✔ Phase complete in {time.time() - self.start:.1f}s{RST}\n")
+
+# ============================================================================
+# SIGNAL HANDLER
+# ============================================================================
+def signal_handler(sig, frame):
+    global SKIP_CURRENT_PHASE
+    print(f"\n{Y}[!] Ctrl+C — skipping current phase, continuing...{RST}")
+    SKIP_CURRENT_PHASE = True
+
+# ============================================================================
+# CHECKPOINT (RESUME)
+# ============================================================================
+def resume_file(workspace):
+    return Path(workspace) / ".clicker_resume.json"
+
+def save_checkpoint(workspace, domain, completed_phases, extra=None):
+    data = {
+        "domain": domain,
+        "completed_phases": sorted(completed_phases),
+        "timestamp": datetime.datetime.now().isoformat(),
+        "extra": extra or {},
+    }
+    try:
+        resume_file(workspace).write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+def load_checkpoint(workspace, domain):
+    rf = resume_file(workspace)
+    if not rf.exists():
+        return None
+    try:
+        data = json.loads(rf.read_text(encoding="utf-8"))
+        if data.get("domain") != domain:
+            return None
+        return data
+    except Exception:
+        return None
+
+def clear_checkpoint(workspace):
+    rf = resume_file(workspace)
+    if rf.exists():
+        try:
+            rf.unlink()
+        except Exception:
+            pass
+
+# ============================================================================
+# API KEYS
+# ============================================================================
+API_KEY_FIELDS = [
+    ("CHAOS_API_KEY", "Chaos"),
+    ("VT_API_KEY", "VirusTotal"),
+    ("GITHUB_TOKEN", "GitHub"),
+    ("SHODAN_API", "Shodan"),
+    ("LEAKIX_API", "LeakIX"),
+]
+
 def read_env_file(path):
-    vals={}
-    if not path.exists(): return vals
-    for line in path.read_text(encoding="utf-8").splitlines():
-        row=line.strip()
-        if not row or row.startswith("#") or "=" not in row: continue
-        k,v=row.split("=",1); vals[k.strip()]=v.strip().strip('"').strip("'")
+    vals = {}
+    p = Path(path)
+    if not p.exists():
+        return vals
+    for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        vals[k.strip()] = v.strip().strip('"').strip("'")
     return vals
-def save_env_file(path,vals):
-    keys=["CHAOS_API_KEY","VT_API_KEY","GITHUB_TOKEN","SHODAN_API","LEAKIX_API"]; lines=["# Clicker API keys"]
-    for k in keys: lines.append(f"{k}={vals.get(k,'')}")
-    path.write_text("\n".join(lines)+"\n",encoding="utf-8")
-def collect_api_keys(api_file):
-    existing=read_env_file(api_file)
-    print(f"\n{BOLD}{Y}[?] API Keys Setup{RST} (file: {api_file})\n{DIM}Press Enter to keep saved, type 'skip' to leave empty.{RST}\n")
-    prompts=[("CHAOS_API_KEY","Chaos"),("VT_API_KEY","VirusTotal"),("GITHUB_TOKEN","GitHub"),("SHODAN_API","Shodan"),("LEAKIX_API","LeakIX")]; updated=dict(existing)
-    for key,label in prompts:
-        cur=existing.get(key,""); tag=f"{G}[saved]{RST}" if cur else f"{R}[empty]{RST}"
-        val=input(f" {label} {tag}: ").strip()
-        if val.lower()=="skip": updated[key]=""
-        elif val: updated[key]=val
-        elif key not in updated: updated[key]=""
-    save_env_file(api_file,updated); print(f"\n{G}[+] API keys saved to {api_file}{RST}\n"); return updated
 
+def save_env_file(path, vals):
+    lines = ["# Clicker API keys", "# Keep this file private — chmod 600 recommended"]
+    for k, _ in API_KEY_FIELDS:
+        lines.append(f"{k}={vals.get(k, '')}")
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+def collect_api_keys(api_file):
+    existing = read_env_file(api_file)
+    print(f"\n{BOLD}{Y}[?] API Keys Setup{RST} (file: {api_file})")
+    print(f"{DIM}Press Enter to keep saved value, type 'skip' to clear.{RST}\n")
+    updated = dict(existing)
+    for key, label in API_KEY_FIELDS:
+        cur = existing.get(key, "")
+        tag = f"{G}[saved]{RST}" if cur else f"{R}[empty]{RST}"
+        try:
+            val = input(f"  {label} {tag}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            val = ""
+        if val.lower() == "skip":
+            updated[key] = ""
+        elif val:
+            updated[key] = val
+        elif key not in updated:
+            updated[key] = ""
+    save_env_file(api_file, updated)
+    log_ok(f"API keys saved to {api_file}")
+    return updated
+
+# ============================================================================
+# SCOPE MANAGEMENT
+# ============================================================================
+def load_scope(path):
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        log_warn(f"Scope file not found: {path}")
+        return None
+    include, exclude = [], []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("!"):
+            exclude.append(line[1:].strip().lower())
+        else:
+            include.append(line.lower())
+    return {"include": include, "exclude": exclude}
+
+def in_scope(domain, scope):
+    if not scope:
+        return True
+    def matches(patterns):
+        for pat in patterns:
+            if pat.startswith("*."):
+                if domain == pat[2:] or domain.endswith("." + pat[2:]):
+                    return True
+            elif domain == pat:
+                return True
+        return False
+    if scope["exclude"] and matches(scope["exclude"]):
+        return False
+    if not scope["include"]:
+        return True
+    return matches(scope["include"])
+
+# ============================================================================
+# TOOL CHECK
+# ============================================================================
 def check_tools(required):
     print(f"{BOLD}{Y}[*] Checking required tools...{RST}")
-    available,missing=set(),[]
+    available, missing = set(), []
     for t in required:
-        if installed(t): available.add(t); print(f" {G}✔{RST} {t}")
-        else: missing.append(t); print(f" {R}✘{RST} {t}")
-    if missing: print(f"\n{Y}[!] {len(missing)} tool(s) missing — affected steps will be skipped.{RST}\n")
-    else: print(f"\n{G}[+] All tools present.{RST}\n")
+        if installed(t):
+            available.add(t)
+            print(f"  {G}✔{RST} {t}")
+        else:
+            missing.append(t)
+            print(f"  {R}✘{RST} {DIM}{t}{RST}")
+    if missing:
+        log_warn(f"{len(missing)} tool(s) missing — affected steps will be skipped")
+    else:
+        log_ok("All required tools present")
     return available
 
-def parse_targets(single,tfile):
-    targets=[]
-    if single: targets.append(single.strip().lower())
+# ============================================================================
+# FALLBACK FILE DOWNLOAD
+# ============================================================================
+def ensure_essential_file(file_type, path):
+    p = Path(path)
+    if p.exists():
+        return str(p)
+    fallback_dir = Path.home() / ".clicker" / "wordlists"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    url = FALLBACK_URLS.get(file_type)
+    if not url:
+        return None
+    fp = fallback_dir / f"{file_type}.txt"
+    if fp.exists():
+        log_ok(f"Using cached {file_type}: {fp}")
+        return str(fp)
+    log_warn(f"{file_type} not found — downloading fallback...")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as res:
+            fp.write_bytes(res.read())
+        log_ok(f"Downloaded {file_type} → {fp}")
+        return str(fp)
+    except Exception as e:
+        log_err(f"Download failed: {e}")
+        return None
+
+# ============================================================================
+# WAF DETECTION HELPERS
+# ============================================================================
+def detect_waf_from_file(workspace, domain):
+    waf_file = Path(workspace) / domain / "waf" / "waf-detected.txt"
+    if waf_file.exists() and not is_file_empty(waf_file):
+        content = waf_file.read_text(errors="ignore").lower()
+        if "cloudflare" in content: return "cloudflare"
+        if "akamai" in content or "edgekey" in content: return "akamai"
+        if "imperva" in content or "incapsula" in content: return "imperva"
+    return GLOBAL_WAF_TYPE
+
+def get_tool_options(tool_name, waf_type):
+    opts = WAF_TOOL_OPTIONS.get(waf_type, WAF_TOOL_OPTIONS["default"])
+    return opts.get(tool_name, "")
+# ============================================================================
+# PHASE 0 — QUICK PROBE
+# ============================================================================
+def phase_quick_probe(domain, workspace):
+    qdir = Path(workspace) / domain / "quick"
+    mkd(qdir)
+    prog = PhaseProgress("0 — Quick Probe", 4)
+    result = {
+        "alive": False, "status": 0, "server": "", "waf_hint": "",
+        "ip": "", "redirect": "", "skip_scan": False, "https": False,
+    }
+
+    try:
+        ip = socket.gethostbyname(domain)
+        result["ip"] = ip
+        prog.step(f"DNS → {G}{ip}{RST}")
+    except Exception:
+        prog.step(f"DNS → {R}unresolvable{RST}")
+
+    try:
+        req = urllib.request.Request(f"https://{domain}", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as res:
+            result["alive"] = True
+            result["https"] = True
+            result["status"] = res.status
+            result["server"] = res.headers.get("Server", "")[:40]
+            for h in ("cf-ray", "x-akamai-transformed", "akamai-grn", "x-cdn", "incap-signal", "x-sucuri-id", "x-amz-cf-id"):
+                if res.headers.get(h):
+                    result["waf_hint"] = h
+                    break
+            prog.step(f"HTTPS probe → {G}{res.status}{RST} {DIM}({result['server']}){RST}")
+    except urllib.error.HTTPError as e:
+        result["alive"] = True
+        result["https"] = True
+        result["status"] = e.code
+        result["server"] = (e.headers.get("Server", "") if e.headers else "")[:40]
+        for h in ("cf-ray", "x-akamai-transformed", "x-cdn", "incap-signal"):
+            if e.headers and e.headers.get(h):
+                result["waf_hint"] = h
+                break
+        prog.step(f"HTTPS probe → {Y}{e.code}{RST} {DIM}({result['server']}){RST}")
+    except Exception:
+        try:
+            req = urllib.request.Request(f"http://{domain}", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as res:
+                result["alive"] = True
+                result["status"] = res.status
+                result["server"] = res.headers.get("Server", "")[:40]
+                if res.geturl().startswith("https://"):
+                    result["https"] = True
+                prog.step(f"HTTP probe → {G}{res.status}{RST} {DIM}({result['server']}){RST}")
+        except urllib.error.HTTPError as e:
+            result["alive"] = True
+            result["status"] = e.code
+            prog.step(f"HTTP probe → {Y}{e.code}{RST}")
+        except Exception:
+            prog.step(f"HTTPS/HTTP probe → {R}dead{RST}")
+
+    if not result["alive"] and not result["ip"]:
+        result["skip_scan"] = True
+        prog.step(f"Decision → {R}SKIP (unresolvable + unreachable){RST}")
+    elif not result["alive"]:
+        prog.step(f"Decision → {Y}proceed (IP exists but no HTTP){RST}")
+    else:
+        prog.step(f"Decision → {G}proceed{RST}")
+
+    prog.done_phase()
+
+    summary = [
+        f"alive={result['alive']}",
+        f"status={result['status']}",
+        f"ip={result['ip']}",
+        f"server={result['server']}",
+        f"waf_hint={result['waf_hint']}",
+        f"https={result['https']}",
+        f"skip_scan={result['skip_scan']}",
+    ]
+    try:
+        (qdir / "probe.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    if result["waf_hint"]:
+        print(f"  {C}[*] WAF hint from headers: {result['waf_hint']}{RST}")
+    if result["skip_scan"]:
+        print(f"  {R}[!] Target seems dead — full scan will be skipped (use --force to override){RST}")
+
+    return result
+
+# ============================================================================
+# PHASE 1 — PASSIVE SUBDOMAIN ENUMERATION (enhanced: -recursive + waymore+unfurl)
+# ============================================================================
+def phase_passive(domain, workspace, api_keys, available):
+    pdir = Path(workspace) / domain / "passive"
+    mkd(pdir)
+    collected = set()
+    logs = []
+    source_files = []
+    prog = PhaseProgress("1 — Passive Subdomain Enumeration", 12)
+
+    try:
+        # Subfinder (with -recursive)
+        if "subfinder" in available:
+            outf = pdir / f"{domain}_subfinder.txt"
+            cmd = f"subfinder -d {q(domain)} -silent -recursive -all -rl 10 -timeout 30 -max-time 20 -o {q(outf)}"
+            _, out, err = run_cmd(cmd, timeout=600, tool_name="subfinder")
+            lines = rlines(outf) if outf.exists() else out.splitlines()
+            parsed = {cleanup_sub(l, domain) for l in lines}
+            parsed = {x for x in parsed if x}
+            wlines(outf, parsed, auto_cleanup=False)
+            collected.update(parsed)
+            logs.append({"tool": "subfinder", "count": len(parsed), "stderr": err[:200]})
+            source_files.append(outf)
+            prog.step(f"subfinder → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("subfinder — skipped")
+
+        # Sublist3r
+        if "sublist3r" in available:
+            outf = pdir / f"{domain}_sublist3r.txt"
+            cmd = f"sublist3r -d {q(domain)} -e 'Google,Bing,Virustotal,Netcraft' -v -o {q(outf)}"
+            _, out, err = run_cmd(cmd, timeout=480, tool_name="sublist3r")
+            lines = rlines(outf) if outf.exists() else out.splitlines()
+            parsed = {cleanup_sub(l, domain) for l in lines}
+            parsed = {x for x in parsed if x}
+            wlines(outf, parsed, auto_cleanup=False)
+            collected.update(parsed)
+            logs.append({"tool": "sublist3r", "count": len(parsed), "stderr": err[:200]})
+            source_files.append(outf)
+            prog.step(f"sublist3r → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("sublist3r — skipped")
+
+        # Chaos
+        if api_keys.get("CHAOS_API_KEY") and "chaos" in available:
+            outf = pdir / f"{domain}_chaos.txt"
+            cmd = f"chaos -d {q(domain)} -silent -key {q(api_keys['CHAOS_API_KEY'])}"
+            _, out, err = run_cmd(cmd, timeout=480, tool_name="chaos")
+            parsed = {cleanup_sub(l, domain) for l in out.splitlines()}
+            parsed = {x for x in parsed if x}
+            wlines(outf, parsed, auto_cleanup=False)
+            collected.update(parsed)
+            logs.append({"tool": "chaos", "count": len(parsed), "stderr": err[:200]})
+            source_files.append(outf)
+            prog.step(f"chaos → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("chaos — skipped")
+
+        # Assetfinder
+        if "assetfinder" in available:
+            outf = pdir / f"{domain}_assetfinder.txt"
+            cmd = f"assetfinder --subs-only {q(domain)}"
+            _, out, err = run_cmd(cmd, timeout=480, tool_name="assetfinder")
+            parsed = {cleanup_sub(l, domain) for l in out.splitlines()}
+            parsed = {x for x in parsed if x}
+            wlines(outf, parsed, auto_cleanup=False)
+            collected.update(parsed)
+            logs.append({"tool": "assetfinder", "count": len(parsed), "stderr": err[:200]})
+            source_files.append(outf)
+            prog.step(f"assetfinder → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("assetfinder — skipped")
+
+        # GitHub-subdomains
+        if api_keys.get("GITHUB_TOKEN") and "github-subdomains" in available:
+            outf = pdir / f"{domain}_github.txt"
+            cmd = f"github-subdomains -d {q(domain)} -t {q(api_keys['GITHUB_TOKEN'])} -q -raw -o {q(outf)}"
+            _, out, err = run_cmd(cmd, timeout=480, tool_name="github-subdomains")
+            lines = rlines(outf) if outf.exists() else out.splitlines()
+            parsed = {cleanup_sub(l, domain) for l in lines}
+            parsed = {x for x in parsed if x}
+            wlines(outf, parsed, auto_cleanup=False)
+            collected.update(parsed)
+            logs.append({"tool": "github-subdomains", "count": len(parsed), "stderr": err[:200]})
+            source_files.append(outf)
+            prog.step(f"github-subdomains → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("github-subdomains — skipped")
+
+        # Findomain
+        if "findomain" in available:
+            outf = pdir / f"{domain}_findomain.txt"
+            cmd = f"findomain -t {q(domain)} -q --rate-limit 1"
+            _, out, err = run_cmd(cmd, timeout=480, tool_name="findomain")
+            parsed = {cleanup_sub(l, domain) for l in out.splitlines()}
+            parsed = {x for x in parsed if x}
+            wlines(outf, parsed, auto_cleanup=False)
+            collected.update(parsed)
+            logs.append({"tool": "findomain", "count": len(parsed), "stderr": err[:200]})
+            source_files.append(outf)
+            prog.step(f"findomain → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("findomain — skipped")
+
+        # crt.sh
+        if "curl" in available and "jq" in available:
+            outf = pdir / f"{domain}_crtsh.txt"
+            url = f"https://crt.sh/?q=%25.{domain}&output=json"
+            cmd = (f"curl -s --max-time 30 --retry 2 -A 'Mozilla/5.0' {q(url)} "
+                   f"| jq -r '.[].name_value' 2>/dev/null "
+                   f"| sort -u")
+            _, out, err = run_cmd(cmd, timeout=120, tool_name="curl")
+            parsed = {cleanup_sub(l, domain) for l in out.splitlines()}
+            parsed = {x for x in parsed if x}
+            wlines(outf, parsed, auto_cleanup=False)
+            collected.update(parsed)
+            logs.append({"tool": "crt.sh", "count": len(parsed), "stderr": err[:200]})
+            source_files.append(outf)
+            prog.step(f"crt.sh → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("crt.sh — skipped")
+
+        # Waybackurls
+        if "waybackurls" in available:
+            outf = pdir / f"{domain}_waybackurls.txt"
+            cmd = f"echo {q(domain)} | waybackurls | sort -u"
+            _, out, err = run_cmd(cmd, timeout=480, tool_name="waybackurls")
+            parsed = extract_hosts_from_urls(out.splitlines(), domain)
+            wlines(outf, parsed, auto_cleanup=False)
+            collected.update(parsed)
+            logs.append({"tool": "waybackurls", "count": len(parsed), "stderr": err[:200]})
+            source_files.append(outf)
+            prog.step(f"waybackurls → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("waybackurls — skipped")
+
+        # GAU
+        if "gau" in available:
+            outf = pdir / f"{domain}_gau.txt"
+            cmd = f"echo {q(domain)} | gau --subs --timeout 10 --threads 2 | sort -u"
+            _, out, err = run_cmd(cmd, timeout=480, tool_name="gau")
+            parsed = extract_hosts_from_urls(out.splitlines(), domain)
+            wlines(outf, parsed, auto_cleanup=False)
+            collected.update(parsed)
+            logs.append({"tool": "gau", "count": len(parsed), "stderr": err[:200]})
+            source_files.append(outf)
+            prog.step(f"gau → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("gau — skipped")
+
+        # VirusTotal
+        if api_keys.get("VT_API_KEY") and "curl" in available:
+            outf = pdir / f"{domain}_virustotal.txt"
+            url = f"https://www.virustotal.com/api/v3/domains/{domain}/subdomains?limit=40"
+            cmd = f"curl -s --max-time 30 -H {q('x-apikey: ' + api_keys['VT_API_KEY'])} {q(url)} | jq -r '.data[].id' 2>/dev/null"
+            _, out, err = run_cmd(cmd, timeout=60, tool_name="curl")
+            parsed = {cleanup_sub(l, domain) for l in out.splitlines()}
+            parsed = {x for x in parsed if x}
+            wlines(outf, parsed, auto_cleanup=False)
+            collected.update(parsed)
+            logs.append({"tool": "virustotal", "count": len(parsed), "stderr": err[:200]})
+            source_files.append(outf)
+            prog.step(f"virustotal → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("virustotal — skipped")
+
+        # NEW: waymore + unfurl domains
+        if "waymore" in available and "unfurl" in available:
+            wout = pdir / f"{domain}_waymore_urls.txt"
+            cmd = f"waymore -i {q(domain)} -mode U -oU {q(wout)} -t 30 2>/dev/null || true"
+            run_cmd(cmd, timeout=600, tool_name="waymore")
+            if wout.exists() and not is_file_empty(wout):
+                outf = pdir / f"{domain}_waymore_subs.txt"
+                cmd2 = (f"cat {q(wout)} | unfurl domains 2>/dev/null "
+                        f"| grep -Ei '(^|\\.){re.escape(domain)}$' | sort -u")
+                _, out, _ = run_cmd(cmd2, timeout=120, tool_name="cat")
+                parsed = {cleanup_sub(l, domain) for l in out.splitlines()}
+                parsed = {x for x in parsed if x}
+                wlines(outf, parsed, auto_cleanup=False)
+                collected.update(parsed)
+                logs.append({"tool": "waymore+unfurl", "count": len(parsed)})
+                source_files.append(outf)
+                prog.step(f"waymore+unfurl → {G}{len(parsed)}{RST} subs")
+            else:
+                prog.step("waymore+unfurl — no output")
+        elif "waymore" in available:
+            # Fallback: extract subs without unfurl using Python urlparse
+            wout = pdir / f"{domain}_waymore_urls.txt"
+            cmd = f"waymore -i {q(domain)} -mode U -oU {q(wout)} -t 30 2>/dev/null || true"
+            run_cmd(cmd, timeout=600, tool_name="waymore")
+            if wout.exists() and not is_file_empty(wout):
+                parsed = extract_hosts_from_urls(rlines(wout), domain)
+                outf = pdir / f"{domain}_waymore_subs.txt"
+                wlines(outf, parsed, auto_cleanup=False)
+                collected.update(parsed)
+                logs.append({"tool": "waymore", "count": len(parsed)})
+                source_files.append(outf)
+                prog.step(f"waymore → {G}{len(parsed)}{RST} subs")
+            else:
+                prog.step("waymore — no output")
+        else:
+            prog.step("waymore+unfurl — skipped")
+
+        # Merge
+        allsubs = pdir / "allsubs.txt"
+        wlines(allsubs, collected, auto_cleanup=False)
+        prog.step(f"merge → {allsubs.name} ({G}{len(collected)}{RST})")
+
+        cleanup_after_merge([f for f in source_files if f.exists()], label="passive-source")
+
+        # High-value subs
+        sensitive = [s for s in collected if s.split(".")[0] in SENSITIVE_PREFIXES]
+        hv = pdir / "high_value_subs.txt"
+        wlines(hv, sensitive)
+        if not is_file_empty(hv):
+            print(f"  {G}✔{RST} high_value_subs.txt — {Y}{len(sensitive)}{RST} entries")
+        else:
+            log_warn("No high-value subdomains found")
+
+        prog.done_phase()
+        print(f"  {BOLD}Total subdomains:{RST} {G}{len(collected)}{RST}")
+        print(f"  {BOLD}High-value subs :{RST} {Y}{len(sensitive)}{RST}")
+
+        if args_verbose:
+            show_file_content(allsubs, "allsubs.txt", max_lines=30)
+            if not is_file_empty(hv):
+                show_file_content(hv, "high_value_subs.txt", max_lines=20)
+
+        return {
+            "allsubs_file": str(allsubs),
+            "all_subdomains": sorted(collected),
+            "sensitive_subs": sorted(sensitive),
+            "tool_logs": logs,
+        }
+    except KeyboardInterrupt:
+        log_warn("Phase 1 skipped")
+        return {"allsubs_file": str(pdir / "allsubs.txt"), "all_subdomains": [], "sensitive_subs": [], "tool_logs": []}
+
+# ============================================================================
+# PHASE 2 — WAF DETECTION
+# ============================================================================
+def phase_waf(domain, workspace, available):
+    global GLOBAL_WAF_TYPE
+    pdir = Path(workspace) / domain / "passive"
+    wdir = Path(workspace) / domain / "waf"
+    mkd(wdir)
+    high_val = pdir / "high_value_subs.txt"
+    prog = PhaseProgress("2 — WAF Detection", 3)
+    detected = "default"
+    waf_simple = wdir / "waf-detected.txt"
+
+    try:
+        httpx_bin = "httpx-toolkit" if "httpx-toolkit" in available else ("httpx" if "httpx" in available else None)
+
+        if httpx_bin and high_val.exists() and not is_file_empty(high_val):
+            out = wdir / "httpx-waf.txt"
+            cmd = (f"{httpx_bin} -l {q(high_val)} -sc -td -cl -server -title -silent "
+                   f"-t 15 -rl 8 -timeout 10 -retries 1 -random-agent -o {q(out)}")
+            run_cmd(cmd, timeout=600, tool_name=httpx_bin)
+            for line in rlines(out):
+                ll = line.lower()
+                if "cloudflare" in ll:
+                    detected = "cloudflare"
+                    break
+                if "akamai" in ll or "edgekey" in ll:
+                    detected = "akamai"
+                    break
+                if "imperva" in ll or "incapsula" in ll:
+                    detected = "imperva"
+                    break
+            prog.step(f"httpx scan → {G}{detected}{RST}")
+        else:
+            prog.step("httpx scan — skipped")
+
+        if detected == "default" and "wafw00f" in available and high_val.exists() and not is_file_empty(high_val):
+            out = wdir / "wafw00f.txt"
+            cmd = f"wafw00f -i {q(high_val)} -a -T 10 --no-colors 2>/dev/null | tee {q(out)}"
+            run_cmd(cmd, timeout=900, tool_name="wafw00f")
+            content = (out.read_text(errors="ignore").lower() if out.exists() else "")
+            for waf_name, keys in [
+                ("cloudflare", ["cloudflare"]),
+                ("akamai", ["akamai", "edgekey"]),
+                ("imperva", ["imperva", "incapsula"]),
+            ]:
+                if any(k in content for k in keys):
+                    detected = waf_name
+                    break
+            prog.step(f"wafw00f → {G}{detected}{RST}")
+        else:
+            prog.step("wafw00f — skipped")
+
+        if detected == "default" and high_val.exists():
+            headers_sig = {
+                "cloudflare": ["cf-ray", "cf-cache-status"],
+                "akamai": ["akamai-grn", "x-akamai-transformed"],
+                "imperva": ["x-cdn", "incap-signal"],
+                "sucuri": ["x-sucuri-id", "x-sucuri-cache"],
+                "aws": ["x-amz-cf-id"],
+            }
+            for host in rlines(high_val)[:10]:
+                try:
+                    url = host if host.startswith("http") else f"https://{host}"
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=5) as res:
+                        hdr_str = str({k.lower(): v for k, v in res.headers.items()}).lower()
+                        for waf_name, indicators in headers_sig.items():
+                            if any(ind in hdr_str for ind in indicators):
+                                detected = waf_name
+                                break
+                    if detected != "default":
+                        break
+                except Exception:
+                    continue
+            prog.step(f"header analysis → {G}{detected}{RST}")
+        else:
+            prog.step("header analysis — skipped")
+
+        if detected != "default":
+            wlines(waf_simple, [f"WAF Detected: {detected.upper()}"], auto_cleanup=False)
+            print(f"  {G}✔{RST} Saved to {waf_simple.name}")
+
+        GLOBAL_WAF_TYPE = detected
+        prog.done_phase()
+        print(f"{C}[*] WAF Type: {detected.upper()}{RST}")
+        return {"waf_file": str(waf_simple) if waf_simple.exists() else None, "waf_type": detected}
+    except KeyboardInterrupt:
+        log_warn("Phase 2 skipped")
+        GLOBAL_WAF_TYPE = "default"
+        return {"waf_file": None, "waf_type": "default"}
+
+# ============================================================================
+# PHASE 3 — ACTIVE SUBDOMAIN ENUMERATION
+# ============================================================================
+def phase_active_subs(domain, workspace, available):
+    if args_skip_active_subs:
+        log_warn("Active subdomain enumeration skipped via flag")
+        return {"active_subs_file": "", "active_count": 0}
+
+    pdir = Path(workspace) / domain / "passive"
+    adir = Path(workspace) / domain / "active_subs"
+    mkd(adir)
+    allsubs_in = pdir / "allsubs.txt"
+    existing = set(rlines(allsubs_in)) if allsubs_in.exists() else set()
+    discovered = set()
+    prog = PhaseProgress("3 — Active Subdomain Enumeration", 4)
+
+    try:
+        if "puredns" in available:
+            wl = ensure_essential_file("wordlist", args_wordlist) or args_wordlist
+            res = ensure_essential_file("resolvers", args_resolvers) or args_resolvers
+            if wl and Path(wl).exists() and res and Path(res).exists():
+                outf = adir / "puredns.txt"
+                cmd = (f"puredns bruteforce {q(wl)} {q(domain)} "
+                       f"-r {q(res)} -w {q(outf)} --quiet")
+                run_cmd(cmd, timeout=1800, tool_name="puredns")
+                parsed = {cleanup_sub(l, domain) for l in rlines(outf)}
+                parsed = {x for x in parsed if x}
+                discovered.update(parsed)
+                prog.step(f"puredns → {G}{len(parsed)}{RST} subs")
+            else:
+                prog.step("puredns — skipped (missing wordlist/resolvers)")
+        else:
+            prog.step("puredns — skipped (not installed)")
+
+        if "altdns" in available and existing:
+            perm_in = adir / "altdns_in.txt"
+            perm_out = adir / "altdns_out.txt"
+            wlines(perm_in, list(existing)[:500], auto_cleanup=False)
+            cmd = f"altdns -i {q(perm_in)} -o {q(perm_out)} 2>/dev/null || true"
+            run_cmd(cmd, timeout=600, tool_name="altdns")
+            if perm_out.exists() and not is_file_empty(perm_out) and "dnsx" in available:
+                resolved = adir / "altdns_resolved.txt"
+                cmd2 = f"dnsx -l {q(perm_out)} -silent -a -resp-only -r 8.8.8.8,1.1.1.1 -o {q(resolved)}"
+                run_cmd(cmd2, timeout=600, tool_name="dnsx")
+                parsed = {cleanup_sub(l, domain) for l in rlines(resolved)}
+                parsed = {x for x in parsed if x}
+                discovered.update(parsed)
+                prog.step(f"altdns+dnsx → {G}{len(parsed)}{RST} permutations")
+            else:
+                prog.step("altdns — 0 permutations")
+        else:
+            prog.step("altdns — skipped")
+
+        if "dnsrecon" in available:
+            outf = adir / "dnsrecon.txt"
+            cmd = f"dnsrecon -d {q(domain)} -t axfr 2>/dev/null || true"
+            _, out, _ = run_cmd(cmd, timeout=300, tool_name="dnsrecon")
+            parsed = set()
+            for line in out.splitlines():
+                for token in re.findall(r'[a-z0-9.-]+\.' + re.escape(domain), line.lower()):
+                    c = cleanup_sub(token, domain)
+                    if c:
+                        parsed.add(c)
+            wlines(outf, parsed, auto_cleanup=False)
+            discovered.update(parsed)
+            prog.step(f"dnsrecon AXFR → {G}{len(parsed)}{RST} subs")
+        else:
+            prog.step("dnsrecon — skipped")
+
+        final = existing | discovered
+        allsubs_final = pdir / "allsubs_final.txt"
+        wlines(allsubs_final, final, auto_cleanup=False)
+        prog.step(f"merge → allsubs_final.txt ({G}{len(final)}{RST} total)")
+
+        prog.done_phase()
+        log_ok(f"Active subs new: {len(discovered)} | Total: {len(final)}")
+
+        return {
+            "active_subs_file": str(allsubs_final),
+            "active_count": len(discovered),
+        }
+    except KeyboardInterrupt:
+        log_warn("Phase 3 skipped")
+        return {"active_subs_file": str(pdir / "allsubs_final.txt"), "active_count": 0}
+
+# ============================================================================
+# PHASE 4 — DNS RESOLUTION (NEW: dnsx pre-filter for httpx)
+# ============================================================================
+def phase_dns_resolution(domain, workspace, available):
+    pdir = Path(workspace) / domain / "passive"
+    ddir = Path(workspace) / domain / "dns"
+    mkd(ddir)
+    allsubs = pdir / "allsubs_final.txt"
+    if not allsubs.exists():
+        allsubs = pdir / "allsubs.txt"
+    prog = PhaseProgress("4 — DNS Resolution", 1)
+    resolved = ddir / "resolved.txt"
+
+    try:
+        if "dnsx" in available and allsubs.exists() and not is_file_empty(allsubs):
+            cmd = (f"dnsx -l {q(allsubs)} -silent -a "
+                   f"-r 8.8.8.8,1.1.1.1,8.8.4.4 -t 100 -rl 200 -resp-only -o {q(resolved)}")
+            run_cmd(cmd, timeout=300, tool_name="dnsx")
+            count = len(rlines(resolved))
+            if count > 0:
+                print(f"  {G}✔{RST} resolved.txt — {count} alive subdomains")
+            prog.step(f"dnsx resolution → {G}{count}{RST} hosts")
+        else:
+            # Fallback: use allsubs directly
+            if allsubs.exists():
+                shutil.copy2(allsubs, resolved)
+            prog.step("dnsx — skipped (using allsubs)")
+        prog.done_phase()
+        return {"resolved_file": str(resolved) if resolved.exists() else ""}
+    except KeyboardInterrupt:
+        log_warn("Phase 4 skipped")
+        return {"resolved_file": ""}
+
+# ============================================================================
+# PHASE 5 — RESPONSE FILTERING (enhanced: ports + status codes)
+# ============================================================================
+def phase_response_filter(domain, workspace, passive, available):
+    adir = Path(workspace) / domain / "active"
+    mkd(adir)
+    pdir = Path(workspace) / domain / "passive"
+    ddir = Path(workspace) / domain / "dns"
+
+    # Use resolved.txt if exists, fallback to allsubs
+    resolved = ddir / "resolved.txt"
+    if resolved.exists() and not is_file_empty(resolved):
+        input_file = resolved
+    else:
+        input_file = pdir / "allsubs_final.txt"
+        if not input_file.exists():
+            input_file = pdir / "allsubs.txt"
+
+    high_val = pdir / "high_value_subs.txt"
+
+    prog = PhaseProgress("5 — Response Filtering", 6)
+    results = {"alive": [], "f403": [], "f404": [], "details": []}
+    httpx_bin = "httpx-toolkit" if "httpx-toolkit" in available else ("httpx" if "httpx" in available else None)
+    waf_type = detect_waf_from_file(workspace, domain)
+    httpx_opts = get_tool_options("httpx", waf_type)
+
+    try:
+        if httpx_bin and high_val.exists() and not is_file_empty(high_val):
+            out = adir / "details.txt"
+            cmd = (f"{httpx_bin} -l {q(high_val)} -sc -td -cl -server -title -ip -silent "
+                   f"-t 15 -rl 8 -timeout 7 -retries 1 -random-agent -follow-redirects "
+                   f"-p {HTTPX_PORTS} {httpx_opts} -o {q(out)}")
+            run_cmd(cmd, timeout=600, tool_name=httpx_bin)
+            results["details"] = rlines(out)
+            prog.step(f"high-value details → {G}{len(results['details'])}{RST}")
+        else:
+            prog.step("high-value details — skipped")
+
+        # Alive check with extended ports + status codes
+        if httpx_bin and input_file.exists() and not is_file_empty(input_file):
+            out = adir / "alive.txt"
+            cmd = (f"{httpx_bin} -l {q(input_file)} "
+                   f"-mc {HTTPX_STATUS_CODES} -silent -t 20 -rl 5 "
+                   f"-timeout 7 -retries 1 -random-agent -follow-redirects "
+                   f"-p {HTTPX_PORTS} {httpx_opts} -o {q(out)}")
+            run_cmd(cmd, timeout=1200, tool_name=httpx_bin)
+            results["alive"] = rlines(out)
+            prog.step(f"alive (extended) → {G}{len(results['alive'])}{RST}")
+        else:
+            prog.step("alive — skipped")
+
+        # 403
+        if httpx_bin and input_file.exists() and not is_file_empty(input_file):
+            out = adir / "403subs.txt"
+            cmd = (f"{httpx_bin} -l {q(input_file)} -mc 403 -silent -t 15 -rl 8 "
+                   f"-timeout 7 -retries 1 -random-agent -follow-redirects "
+                   f"{httpx_opts} -o {q(out)}")
+            run_cmd(cmd, timeout=600, tool_name=httpx_bin)
+            results["f403"] = rlines(out)
+            prog.step(f"403 filter → {Y}{len(results['f403'])}{RST}")
+        else:
+            prog.step("403 filter — skipped")
+
+        # 404
+        if httpx_bin and input_file.exists() and not is_file_empty(input_file):
+            out = adir / "404subs.txt"
+            cmd = (f"{httpx_bin} -l {q(input_file)} -mc 404 -silent -t 15 -rl 8 "
+                   f"-timeout 7 -retries 1 -random-agent -follow-redirects "
+                   f"{httpx_opts} -o {q(out)}")
+            run_cmd(cmd, timeout=600, tool_name=httpx_bin)
+            results["f404"] = rlines(out)
+            prog.step(f"404 filter → {R}{len(results['f404'])}{RST}")
+        else:
+            prog.step("404 filter — skipped")
+
+        success = adir / "success-response.txt"
+        wlines(success, results["alive"], auto_cleanup=False)
+        prog.step(f"success-response.txt → {G}{len(results['alive'])}{RST}")
+
+        prog.done_phase()
+        if args_verbose:
+            show_file_content(success, "success-response.txt", max_lines=30)
+        return results
+    except KeyboardInterrupt:
+        log_warn("Phase 5 skipped")
+        return results
+
+# ============================================================================
+# PHASE 6 — TECHNOLOGY DETECTION
+# ============================================================================
+def phase_tech_detect(domain, workspace, available):
+    adir = Path(workspace) / domain / "active"
+    sucf = adir / "success-response.txt"
+    techf = adir / "subs-Tech.txt"
+    ipsf = adir / "ips.txt"
+    alivef = adir / "alive-final.txt"
+    prog = PhaseProgress("6 — Technology Detection", 3)
+    httpx_bin = "httpx-toolkit" if "httpx-toolkit" in available else ("httpx" if "httpx" in available else None)
+    httpx_opts = get_tool_options("httpx", GLOBAL_WAF_TYPE)
+
+    try:
+        if httpx_bin and sucf.exists() and not is_file_empty(sucf):
+            cmd = (f"{httpx_bin} -l {q(sucf)} -sc -td -cl -server -title -ip -silent "
+                   f"-t 15 -rl 8 -timeout 10 -retries 1 -random-agent {httpx_opts} -o {q(techf)}")
+            run_cmd(cmd, timeout=1200, tool_name=httpx_bin)
+            prog.step(f"httpx tech detection → {techf.name}")
+        else:
+            prog.step("httpx tech — skipped")
+
+        if techf.exists() and not is_file_empty(techf):
+            raw = techf.read_text(errors="ignore")
+            ips = set(re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', raw))
+            wlines(ipsf, ips)
+            prog.step(f"IP extraction → {G}{len(ips)}{RST}")
+        else:
+            prog.step("IP extraction — skipped")
+
+        if techf.exists() and not is_file_empty(techf):
+            alive = []
+            for line in rlines(techf):
+                m = re.search(r'\[(200|201|202|204|301|302|303|307|308)\]', line)
+                if m:
+                    url_match = re.search(r'https?://\S+', line)
+                    if url_match:
+                        alive.append(url_match.group(0))
+            wlines(alivef, alive)
+            prog.step(f"alive-final → {G}{len(alive)}{RST}")
+        else:
+            prog.step("alive-final — skipped")
+
+        prog.done_phase()
+        if args_verbose:
+            if techf.exists():
+                show_file_content(techf, "subs-Tech.txt", max_lines=30)
+        return {"ips_file": str(ipsf), "alive_final": str(alivef)}
+    except KeyboardInterrupt:
+        log_warn("Phase 6 skipped")
+        return {"ips_file": "", "alive_final": ""}
+
+# ============================================================================
+# PHASE 7 — SUBDOMAIN TAKEOVER
+# ============================================================================
+def phase_takeover(domain, workspace, available):
+    adir = Path(workspace) / domain / "active"
+    tdir = Path(workspace) / domain / "takeover"
+    mkd(tdir)
+    f404 = adir / "404subs.txt"
+    prog = PhaseProgress("7 — Subdomain Takeover", 3)
+    findings = []
+
+    try:
+        if "subzy" in available and f404.exists() and not is_file_empty(f404):
+            outf = tdir / "subzy-results.txt"
+            cmd = f"subzy run --targets {q(f404)} --concurrency 5 --timeout 8 --hide_fails 2>/dev/null | tee {q(outf)}"
+            run_cmd(cmd, timeout=600, tool_name="subzy")
+            if not is_file_empty(outf):
+                findings.extend(rlines(outf))
+            prog.step(f"subzy → {G}{len(rlines(outf))}{RST}")
+        else:
+            prog.step("subzy — skipped")
+
+        if "subjack" in available and f404.exists() and not is_file_empty(f404):
+            outf = tdir / "subjack-results.json"
+            cmd = f"subjack -w {q(f404)} -t 8 -timeout 10 -ssl -o {q(outf)} 2>/dev/null"
+            run_cmd(cmd, timeout=600, tool_name="subjack")
+            if not is_file_empty(outf):
+                findings.extend(rlines(outf))
+            prog.step(f"subjack → {G}{len(rlines(outf))}{RST}")
+        else:
+            prog.step("subjack — skipped")
+
+        if "nuclei" in available and f404.exists() and not is_file_empty(f404):
+            outf = tdir / "nuclei-takeover.txt"
+            cmd = (f"nuclei -list {q(f404)} -tags takeover -silent -rl 10 -c 5 "
+                   f"-timeout 8 -retries 1 -no-interactsh 2>/dev/null | tee {q(outf)}")
+            run_cmd(cmd, timeout=1200, tool_name="nuclei")
+            if not is_file_empty(outf):
+                findings.extend(rlines(outf))
+            prog.step(f"nuclei takeover → {G}{len(rlines(outf))}{RST}")
+        else:
+            prog.step("nuclei takeover — skipped")
+
+        prog.done_phase()
+        if findings:
+            print(f"  {R}{BOLD}⚠ {len(findings)} potential takeover(s) found{RST}")
+        return {"takeover_dir": str(tdir), "findings": findings}
+    except KeyboardInterrupt:
+        log_warn("Phase 7 skipped")
+        return {"takeover_dir": str(tdir), "findings": []}
+
+# ============================================================================
+# PHASE 8 — VULNERABILITY SCANNING
+# ============================================================================
+def _cors_one(url):
+    try:
+        req = urllib.request.Request(url, headers={
+            "Origin": "https://evil-clicker-probe.com",
+            "User-Agent": "Mozilla/5.0",
+        })
+        with urllib.request.urlopen(req, timeout=4) as res:
+            acao = res.headers.get("Access-Control-Allow-Origin", "")
+            acac = res.headers.get("Access-Control-Allow-Credentials", "")
+            if acao in ("https://evil-clicker-probe.com", "*"):
+                severity = "HIGH" if (acac.lower() == "true" and acao != "*") else "MEDIUM"
+                return f"{url} | {severity} | ACAO={acao} ACAC={acac}"
+    except Exception:
+        pass
+    return None
+
+def _exposed_one(base_url):
+    out = []
+    for path in EXPOSED_FILE_PATHS:
+        url = base_url.rstrip("/") + path
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=3) as res:
+                if res.status == 200:
+                    body = res.read(512)
+                    if path == "/.git/HEAD" and b"ref:" not in body.lower():
+                        continue
+                    if path.endswith(".env") and b"=" not in body:
+                        continue
+                    out.append(f"{url} [200]")
+        except urllib.error.HTTPError:
+            continue
+        except Exception:
+            continue
+    return out
+
+def phase_vuln_scan(domain, workspace, available):
+    if args_skip_vuln:
+        log_warn("Vulnerability scan skipped via flag")
+        return {"nuclei": [], "cors": [], "exposed": []}
+
+    adir = Path(workspace) / domain / "active"
+    vdir = Path(workspace) / domain / "vulns"
+    mkd(vdir)
+    alivef = adir / "alive-final.txt"
+    prog = PhaseProgress("8 — Vulnerability Scanning", 3)
+    results = {"nuclei": [], "cors": [], "exposed": []}
+
+    try:
+        if "nuclei" in available and alivef.exists() and not is_file_empty(alivef):
+            outf = vdir / "nuclei-results.txt"
+            cmd = (f"nuclei -list {q(alivef)} "
+                   f"-severity critical,high "
+                   f"-tags cve,exposure,misconfig "
+                   f"-silent -rl 50 -c 25 -timeout 6 -retries 1 "
+                   f"-no-interactsh -stats -stats-interval 15 "
+                   f"-o {q(outf)} 2>&1 | grep -vE '^\\[INF\\]|^\\[WRN\\]' || true")
+            print(f"  {DIM}Running nuclei (this may take a few minutes)...{RST}")
+            run_cmd(cmd, timeout=900, tool_name="nuclei")
+            if not is_file_empty(outf):
+                results["nuclei"] = rlines(outf)
+            prog.step(f"nuclei → {G}{len(results['nuclei'])}{RST} findings")
+        else:
+            prog.step("nuclei — skipped")
+
+        hosts_to_check = []
+        if alivef.exists() and not is_file_empty(alivef):
+            for line in rlines(alivef):
+                m = re.search(r'https?://\S+', line)
+                if m:
+                    hosts_to_check.append(m.group(0))
+                elif line.startswith(("http://", "https://")):
+                    hosts_to_check.append(line)
+        seen = set()
+        hosts_to_check = [h for h in hosts_to_check if not (h in seen or seen.add(h))]
+
+        cors_findings = []
+        if hosts_to_check:
+            print(f"  {DIM}Checking CORS on {len(hosts_to_check)} host(s) (parallel)...{RST}")
+            with ThreadPoolExecutor(max_workers=10) as ex:
+                futures = {ex.submit(_cors_one, u): u for u in hosts_to_check[:30]}
+                for fut in as_completed(futures):
+                    try:
+                        r = fut.result()
+                        if r:
+                            cors_findings.append(r)
+                    except Exception:
+                        continue
+            if cors_findings:
+                wlines(vdir / "cors.txt", cors_findings, auto_cleanup=False)
+                results["cors"] = cors_findings
+        prog.step(f"CORS check → {G}{len(cors_findings)}{RST}")
+
+        exposed = []
+        targets_exposed = hosts_to_check[:15]
+        if targets_exposed:
+            print(f"  {DIM}Checking exposed files on {len(targets_exposed)} host(s) (parallel)...{RST}")
+            with ThreadPoolExecutor(max_workers=10) as ex:
+                futures = {ex.submit(_exposed_one, u): u for u in targets_exposed}
+                for fut in as_completed(futures):
+                    try:
+                        exposed.extend(fut.result())
+                    except Exception:
+                        continue
+            if exposed:
+                wlines(vdir / "exposed-files.txt", exposed, auto_cleanup=False)
+                results["exposed"] = exposed
+        prog.step(f"Exposed files → {G}{len(exposed)}{RST}")
+
+        prog.done_phase()
+        if args_verbose:
+            if results["nuclei"]:
+                show_file_content(vdir / "nuclei-results.txt", "nuclei-results.txt", max_lines=30)
+            if results["cors"]:
+                show_file_content(vdir / "cors.txt", "cors.txt", max_lines=20)
+            if results["exposed"]:
+                show_file_content(vdir / "exposed-files.txt", "exposed-files.txt", max_lines=20)
+        return results
+    except KeyboardInterrupt:
+        log_warn("Phase 8 skipped")
+        return results
+
+# ============================================================================
+# PHASE 9 — PORT SCANNING
+# ============================================================================
+def phase_ports(domain, workspace, available):
+    adir = Path(workspace) / domain / "active"
+    pdir = Path(workspace) / domain / "passive"
+    ipsf = adir / "ips.txt"
+    allsubs = pdir / "allsubs_final.txt"
+    if not allsubs.exists():
+        allsubs = pdir / "allsubs.txt"
+    real_ips = adir / "real-ips.txt"
+    open_ports_txt = adir / "open-ports-full.txt"
+    nmap_results = adir / "nmap-scripts.txt"
+    prog = PhaseProgress("9 — Port Scanning", 5)
+    naabu_opts = get_tool_options("naabu", GLOBAL_WAF_TYPE)
+    nmap_opts = get_tool_options("nmap", GLOBAL_WAF_TYPE)
+
+    try:
+        resolved = adir / "resolved-ips.txt"
+        if "dnsx" in available and allsubs.exists() and not is_file_empty(allsubs):
+            cmd = f"dnsx -l {q(allsubs)} -resp-only -a -silent -t 100 -r 8.8.8.8,1.1.1.1 -o {q(resolved)}"
+            run_cmd(cmd, timeout=300, tool_name="dnsx")
+            prog.step("dnsx resolve all subdomains")
+        else:
+            prog.step("dnsx — skipped")
+
+        all_ips = adir / "all-ips-final.txt"
+        merge_src = [str(ipsf), str(resolved)]
+        merge_src = [s for s in merge_src if Path(s).exists()]
+        if merge_src:
+            cmd = f"cat {' '.join(q(s) for s in merge_src)} 2>/dev/null | sort -u > {q(all_ips)}"
+            run_cmd(cmd, timeout=60, tool_name="cat")
+            prog.step(f"merge all IPs → {len(rlines(all_ips))}")
+        else:
+            all_ips.touch()
+            prog.step("merge all IPs — empty")
+
+        if not is_file_empty(all_ips) and "cdncheck" in available:
+            cdn_res = adir / "cdn-results.txt"
+            cmd = f"cat {q(all_ips)} | cdncheck -silent -resp -r 8.8.8.8,1.1.1.1 -o {q(cdn_res)}"
+            run_cmd(cmd, timeout=180, tool_name="cdncheck")
+            cmd2 = (f"cat {q(all_ips)} | cdncheck -silent -resp -r 8.8.8.8,1.1.1.1 "
+                    f"| grep -ivE 'cloudflare|akamai|fastly|cloudfront|incapsula|sucuri|aws|azure|google' "
+                    f"| awk '{{print $1}}' | sort -u > {q(real_ips)}")
+            run_cmd(cmd2, timeout=180, tool_name="cdncheck")
+            if not is_file_empty(real_ips):
+                print(f"  {G}✔{RST} real-ips.txt — {len(rlines(real_ips))} non-CDN IPs")
+            prog.step("CDN filtering")
+        else:
+            if all_ips.exists():
+                real_ips.write_text(all_ips.read_text())
+            else:
+                real_ips.touch()
+            prog.step("CDN filtering — skipped")
+
+        if "naabu" in available and real_ips.exists() and not is_file_empty(real_ips):
+            json_out = adir / "open-ports.json"
+            cmd = (f"naabu -list {q(real_ips)} -p {PORTS_COMMON} -rate 300 -c 25 -retries 1 "
+                   f"-timeout 1000 -Pn -s s -verify -silent -json {naabu_opts} -o {q(json_out)}")
+            run_cmd(cmd, timeout=1200, tool_name="naabu")
+            formatted = []
+            if json_out.exists():
+                for line in rlines(json_out):
+                    try:
+                        entry = json.loads(line)
+                        host = entry.get("host", entry.get("input", ""))
+                        port = entry.get("port", "")
+                        proto = entry.get("protocol", "tcp").upper()
+                        formatted.append(f"{host}:{port}/{proto}")
+                    except Exception:
+                        continue
+            if formatted:
+                wlines(open_ports_txt, formatted, auto_cleanup=False)
+                print(f"  {G}✔{RST} open-ports-full.txt — {len(formatted)} ports")
+            cleanup_empty_file(json_out, "raw-json")
+            prog.step(f"naabu scan → {G}{len(formatted)}{RST} ports")
+        else:
+            prog.step("naabu — skipped")
+
+        if "nmap" in available and open_ports_txt.exists() and not is_file_empty(open_ports_txt):
+            ips_to_scan = set()
+            for line in rlines(open_ports_txt):
+                m = re.match(r"([^:/]+):\d+", line)
+                if m:
+                    ips_to_scan.add(m.group(1))
+            if ips_to_scan:
+                ip_list = adir / "nmap-targets.txt"
+                wlines(ip_list, ips_to_scan, auto_cleanup=False)
+                nmap_prefix = adir / "nmap-scripts"
+                cmd = (f"nmap -iL {q(ip_list)} -sC -sV --open -T4 -Pn -n --version-light "
+                       f"--max-retries 1 --host-timeout 10m {nmap_opts} "
+                       f"-p 21,22,23,25,53,80,443,3306,3389,5432,6379,8080,8443,9200,27017 "
+                       f"-oA {q(nmap_prefix)}")
+                run_cmd(cmd, timeout=1800, tool_name="nmap")
+                nmap_file = adir / "nmap-scripts.nmap"
+                if nmap_file.exists():
+                    cmd2 = (f"grep -iE 'vuln|CVE-|sqli|xss|injection|exploit|weak|anonymous|"
+                            f"auth.*bypass|misconfig' {q(nmap_file)} | grep -vE '^#|^Nmap|^Host:|^Port:' "
+                            f"| sort -u > {q(nmap_results)}")
+                    run_cmd(cmd2, timeout=300, tool_name="grep")
+                    if not is_file_empty(nmap_results):
+                        print(f"  {G}✔{RST} nmap-scripts.txt — {len(rlines(nmap_results))} findings")
+            prog.step("nmap -sC vuln scan")
+        else:
+            prog.step("nmap — skipped")
+
+        prog.done_phase()
+        if args_verbose and not is_file_empty(open_ports_txt):
+            show_file_content(open_ports_txt, "open-ports-full.txt", max_lines=40)
+        return {"open_ports_file": str(open_ports_txt) if open_ports_txt.exists() else None}
+    except KeyboardInterrupt:
+        log_warn("Phase 9 skipped")
+        return {"open_ports_file": None}
+
+# ============================================================================
+# PHASE 10 — LEAKIX
+# ============================================================================
+def phase_leakix(domain, workspace, available):
+    adir = Path(workspace) / domain / "active"
+    ldir = Path(workspace) / domain / "leakix"
+    mkd(ldir)
+    ipsf = adir / "ips.txt"
+    alivef = adir / "alive-final.txt"
+    prog = PhaseProgress("10 — LeakIX Exposure Check", 2)
+    key = api_keys_global.get("LEAKIX_API", "")
+    out_ips = ldir / "leakix-ips.txt"
+    out_doms = ldir / "leakix-domains.txt"
+
+    try:
+        if not key:
+            prog.step("LeakIX — skipped (no API key)")
+            prog.step("LeakIX — skipped (no API key)")
+            prog.done_phase()
+            return {"leakix_ips": "", "leakix_domains": ""}
+
+        if "curl" in available and "jq" in available and ipsf.exists() and not is_file_empty(ipsf):
+            ips = [ip for ip in rlines(ipsf) if validate_ip(ip)][:30]
+            findings = []
+            for ip in ips:
+                try:
+                    url = f"https://leakix.net/host/{ip}"
+                    cmd = f"curl -s --max-time 10 -H {q('api-key: ' + key)} -H 'Accept: application/json' {q(url)}"
+                    _, out, _ = run_cmd(cmd, timeout=15, tool_name="curl")
+                    if not out or '"error"' in out:
+                        continue
+                    try:
+                        data = json.loads(out)
+                    except Exception:
+                        continue
+                    for svc in data.get("Services", []) or []:
+                        leak = svc.get("leak") or {}
+                        if leak.get("type") or leak.get("details"):
+                            findings.append(
+                                f"{ip} | port {svc.get('port')} | {svc.get('protocol','')} | "
+                                f"leak={leak.get('type','')} | {svc.get('software', {}).get('name','')}"
+                            )
+                except Exception:
+                    continue
+                time.sleep(0.5)
+            if findings:
+                wlines(out_ips, findings, auto_cleanup=False)
+                print(f"  {G}✔{RST} leakix-ips.txt — {len(findings)} findings")
+            prog.step(f"LeakIX IP scan → {G}{len(findings)}{RST}")
+        else:
+            prog.step("LeakIX IP scan — skipped")
+
+        if "curl" in available and "jq" in available and alivef.exists() and not is_file_empty(alivef):
+            doms = set()
+            for line in rlines(alivef)[:30]:
+                try:
+                    h = urlparse(line if "://" in line else "https://" + line).hostname
+                    if h:
+                        doms.add(h)
+                except Exception:
+                    continue
+            findings = []
+            for d in list(doms)[:20]:
+                try:
+                    url = f"https://leakix.net/domain/{d}"
+                    cmd = f"curl -s --max-time 10 -H {q('api-key: ' + key)} -H 'Accept: application/json' {q(url)}"
+                    _, out, _ = run_cmd(cmd, timeout=15, tool_name="curl")
+                    if not out or '"error"' in out:
+                        continue
+                    try:
+                        data = json.loads(out)
+                    except Exception:
+                        continue
+                    for svc in data.get("Services", []) or []:
+                        leak = svc.get("leak") or {}
+                        if leak.get("type") or leak.get("details"):
+                            findings.append(
+                                f"{d} | port {svc.get('port')} | leak={leak.get('type','')}"
+                            )
+                except Exception:
+                    continue
+                time.sleep(0.5)
+            if findings:
+                wlines(out_doms, findings, auto_cleanup=False)
+                print(f"  {G}✔{RST} leakix-domains.txt — {len(findings)} findings")
+            prog.step(f"LeakIX domain scan → {G}{len(findings)}{RST}")
+        else:
+            prog.step("LeakIX domain scan — skipped")
+
+        prog.done_phase()
+        return {
+            "leakix_ips": str(out_ips) if out_ips.exists() else "",
+            "leakix_domains": str(out_doms) if out_doms.exists() else "",
+        }
+    except KeyboardInterrupt:
+        log_warn("Phase 10 skipped")
+        return {"leakix_ips": "", "leakix_domains": ""}
+
+# ============================================================================
+# PHASE 11 — CONTENT DISCOVERY (enhanced: uro + waymore providers + gau blacklist)
+# ============================================================================
+def phase_content_discovery(domain, workspace, available):
+    adir = Path(workspace) / domain / "active"
+    udir = Path(workspace) / domain / "urls"
+    mkd(udir)
+    alivef = adir / "alive-final.txt"
+    prog = PhaseProgress("11 — Content Discovery", 7)
+    url_files = []
+
+    try:
+        # waybackurls
+        if "waybackurls" in available and alivef.exists() and not is_file_empty(alivef):
+            outf = udir / "waybackurls.txt"
+            cmd = (f"cat {q(alivef)} | waybackurls 2>/dev/null | grep -vE {q(URL_FILTER_PATTERN)} "
+                   f"| sort -u | tee {q(outf)}")
+            run_cmd(cmd, timeout=900, tool_name="waybackurls")
+            url_files.append(outf)
+            prog.step(f"waybackurls → {G}{len(rlines(outf))}{RST}")
+        else:
+            prog.step("waybackurls — skipped")
+
+        # gau with --blacklist (faster than grep)
+        if "gau" in available and alivef.exists() and not is_file_empty(alivef):
+            outf = udir / "gau.txt"
+            cmd = (f"cat {q(alivef)} | gau --threads 5 --timeout 10 "
+                   f"--blacklist png,jpg,gif,css,js,ico,svg,woff,woff2,ttf,eot 2>/dev/null "
+                   f"| sort -u | tee {q(outf)}")
+            run_cmd(cmd, timeout=900, tool_name="gau")
+            url_files.append(outf)
+            prog.step(f"gau → {G}{len(rlines(outf))}{RST}")
+        else:
+            prog.step("gau — skipped")
+
+        # katana
+        if "katana" in available and alivef.exists() and not is_file_empty(alivef):
+            outf = udir / "katana.txt"
+            cmd = (f"katana -list {q(alivef)} -d 3 -jc -kf all -silent -c 5 -rl 20 "
+                   f"-timeout 10 -retry 1 -o {q(outf)}")
+            run_cmd(cmd, timeout=1200, tool_name="katana")
+            url_files.append(outf)
+            prog.step(f"katana → {G}{len(rlines(outf))}{RST}")
+        else:
+            prog.step("katana — skipped")
+
+        # waymore with --providers
+        if "waymore" in available and alivef.exists() and not is_file_empty(alivef):
+            outf = udir / "waymore.txt"
+            cmd = (f"waymore -i {q(alivef)} -mode U -p 3 -oU {q(outf)} "
+                   f"--providers wayback,commoncrawl,otx,urlscan -ow 2>/dev/null || true")
+            run_cmd(cmd, timeout=1200, tool_name="waymore")
+            url_files.append(outf)
+            prog.step(f"waymore → {G}{len(rlines(outf))}{RST}")
+        else:
+            prog.step("waymore — skipped")
+
+        # Merge all URLs
+        merged_urls = udir / "urls.txt"
+        existing = [f for f in url_files if f.exists() and not is_file_empty(f)]
+        if existing:
+            cmd = f"cat {' '.join(q(str(f)) for f in existing)} 2>/dev/null | sort -u > {q(merged_urls)}"
+            run_cmd(cmd, timeout=120, tool_name="cat")
+        else:
+            merged_urls.touch()
+        prog.step(f"merge URLs → {G}{len(rlines(merged_urls))}{RST}")
+
+        # Apply URL filter (in case gau/katana missed some)
+        clean_urls = udir / "clean_urls.txt"
+        cmd = (f"grep -ivE {q(URL_FILTER_PATTERN)} {q(merged_urls)} 2>/dev/null "
+               f"| sort -u > {q(clean_urls)} || true")
+        run_cmd(cmd, timeout=60, tool_name="grep")
+        prog.step(f"filter media → {G}{len(rlines(clean_urls))}{RST}")
+
+        # NEW: uro normalization
+        final_urls = udir / "final-urls.txt"
+        if "uro" in available and clean_urls.exists() and not is_file_empty(clean_urls):
+            cmd = f"cat {q(clean_urls)} | uro | sort -u > {q(final_urls)} || cp {q(clean_urls)} {q(final_urls)}"
+            run_cmd(cmd, timeout=300, tool_name="uro")
+            prog.step(f"uro normalization → {G}{len(rlines(final_urls))}{RST} URLs")
+        else:
+            # Fallback: copy clean_urls to final
+            if clean_urls.exists():
+                shutil.copy2(clean_urls, final_urls)
+            else:
+                final_urls.touch()
+            prog.step(f"final-urls → {G}{len(rlines(final_urls))}{RST} (no uro)")
+
+        cleanup_after_merge(existing, label="url-source")
+        prog.done_phase()
+        if args_verbose and not is_file_empty(final_urls):
+            show_file_content(final_urls, "final-urls.txt", max_lines=40)
+        return {"final_urls": str(final_urls), "clean_urls": str(clean_urls)}
+    except KeyboardInterrupt:
+        log_warn("Phase 11 skipped")
+        return {"final_urls": "", "clean_urls": ""}
+
+# ============================================================================
+# PHASE 12 — SENSITIVE FILES (NEW: passive + active dirsearch + ffuf)
+# ============================================================================
+def phase_sensitive_files(domain, workspace, available):
+    if args_skip_fuzz:
+        log_warn("Sensitive files / fuzzing skipped via flag")
+        return {"passive": "", "dirsearch": "", "ffuf": ""}
+
+    udir = Path(workspace) / domain / "urls"
+    sdir = Path(workspace) / domain / "sensitive"
+    mkd(sdir)
+    clean_urls = udir / "clean_urls.txt"
+    if not clean_urls.exists():
+        clean_urls = udir / "final-urls.txt"
+    adir = Path(workspace) / domain / "active"
+    alivef = adir / "alive-final.txt"
+
+    prog = PhaseProgress("12 — Sensitive Files", 3)
+    results = {"passive": "", "dirsearch": "", "ffuf": ""}
+
+    try:
+        # --- Step 1: Passive filtering from URLs ---
+        if clean_urls.exists() and not is_file_empty(clean_urls):
+            outf = sdir / "sensitive_files_passive.txt"
+            # Filter out noise (sitemap, robots, feed, well-known, news, content/)
+            cmd = (f"grep -iE {q(SENSITIVE_EXTENSIONS)} {q(clean_urls)} 2>/dev/null "
+                   f"| grep -viE 'sitemap|robots|feed|rss|well-known|content/|news|assets/' "
+                   f"| sort -u > {q(outf)} || true")
+            run_cmd(cmd, timeout=120, tool_name="grep")
+            count = len(rlines(outf))
+            if count > 0:
+                results["passive"] = str(outf)
+                print(f"  {G}✔{RST} sensitive_files_passive.txt — {count} potential files")
+            prog.step(f"passive sensitive files → {G}{count}{RST}")
+        else:
+            prog.step("passive sensitive files — no URLs")
+
+        # --- Step 2: Active dirsearch on alive hosts ---
+        if "dirsearch" in available and alivef.exists() and not is_file_empty(alivef):
+            # Extract base URLs
+            base_urls = sdir / "base_urls.txt"
+            urls = []
+            for line in rlines(alivef)[:10]:  # limit to 10 to avoid very long runs
+                m = re.search(r'(https?://[^\s]+)', line)
+                if m:
+                    urls.append(m.group(1))
+            if urls:
+                wlines(base_urls, urls, auto_cleanup=False)
+                outf = sdir / "dirsearch.json"
+                # Use downloaded wordlist
+                wl = ensure_essential_file("dirsearch_wordlist", 
+                    "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt")
+                if not wl:
+                    wl = "/usr/share/seclists/Discovery/Web-Content/common.txt"
+                
+                cmd = (f"dirsearch -l {q(base_urls)} "
+                       f"-e {q(FUZZ_EXTENSIONS)} "
+                       f"-w {q(wl)} "
+                       f"-t 5 --max-rate=3 --delay=0.7 --timeout=10 --retries=2 "
+                       f"--random-agent -r --max-recursion-depth=2 --full-url "
+                       f"--exclude-sizes=0B "
+                       f"-o {q(outf)} --format=json --log={q(sdir/'dirsearch.log')} 2>/dev/null || true")
+                print(f"  {DIM}Running dirsearch on {len(urls)} host(s)...{RST}")
+                run_cmd(cmd, timeout=1800, tool_name="dirsearch")
+                if outf.exists() and not is_file_empty(outf):
+                    results["dirsearch"] = str(outf)
+                prog.step(f"dirsearch → {G}{'done' if results['dirsearch'] else 'no results'}{RST}")
+            else:
+                prog.step("dirsearch — no base URLs")
+        else:
+            prog.step("dirsearch — skipped")
+
+        # --- Step 3: ffuf on top alive hosts ---
+        if "ffuf" in available and alivef.exists() and not is_file_empty(alivef):
+            wl = ensure_essential_file("dirsearch_wordlist",
+                "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt")
+            if not wl:
+                wl = "/usr/share/seclists/Discovery/Web-Content/common.txt"
+
+            # Extract first 5 URLs
+            targets = []
+            for line in rlines(alivef)[:5]:
+                m = re.search(r'(https?://[^\s/]+)', line)
+                if m and m.group(1) not in targets:
+                    targets.append(m.group(1))
+
+            if targets and Path(wl).exists():
+                all_ffuf = []
+                for tgt in targets:
+                    safe_name = re.sub(r'[^a-zA-Z0-9.-]', '_', tgt.replace("https://", "").replace("http://", ""))
+                    outf = sdir / f"ffuf_{safe_name}.json"
+                    cmd = (f"ffuf -u {q(tgt)}/FUZZ -w {q(wl)} "
+                           f"-e {q('.' + FUZZ_EXTENSIONS.replace(',', ',.'))} "
+                           f"-D -t 5 -p 0.7-1.2 -rate 3 -timeout 10 "
+                           f"-recursion -recursion-depth 2 -recursion-strategy greedy "
+                           f"-mc 200,204,301,302,307 -fs 0 -c "
+                           f"-o {q(outf)} -of json 2>/dev/null || true")
+                    print(f"  {DIM}Running ffuf on {tgt}...{RST}")
+                    run_cmd(cmd, timeout=1200, tool_name="ffuf")
+                    if outf.exists() and not is_file_empty(outf):
+                        all_ffuf.append(str(outf))
+                if all_ffuf:
+                    results["ffuf"] = ",".join(all_ffuf)
+                prog.step(f"ffuf → {G}{len(all_ffuf)}{RST} host(s)")
+            else:
+                prog.step("ffuf — no targets")
+        else:
+            prog.step("ffuf — skipped")
+
+        prog.done_phase()
+        return results
+    except KeyboardInterrupt:
+        log_warn("Phase 12 skipped")
+        return results
+
+# ============================================================================
+# PHASE 13 — JS RECON (enhanced: katana JS extraction)
+# ============================================================================
+def phase_js_recon(domain, workspace, available):
+    if args_skip_js:
+        log_warn("JS recon skipped via flag")
+        return {"js_file": "", "secrets_file": ""}
+
+    udir = Path(workspace) / domain / "urls"
+    jsdir = Path(workspace) / domain / "js"
+    mkd(jsdir)
+    final_urls = udir / "final-urls.txt"
+    clean_urls = udir / "clean_urls.txt"
+    adir = Path(workspace) / domain / "active"
+    alivef = adir / "alive-final.txt"
+
+    js_file = jsdir / "jsfiles.txt"
+    prog = PhaseProgress("13 — JS Recon & Secrets", 3)
+
+    try:
+        # Source 1: from final URLs
+        source_file = final_urls if final_urls.exists() else clean_urls
+        if source_file.exists() and not is_file_empty(source_file):
+            cmd = (f"grep -iE {q(r'\.js(\?|#|$)')} {q(source_file)} 2>/dev/null "
+                   f"| grep -E {q(r'^https?://')} | sort -u > {q(js_file)}")
+            run_cmd(cmd, timeout=120, tool_name="grep")
+            js_count = len(rlines(js_file))
+            prog.step(f"JS from URLs → {G}{js_count}{RST}")
+        else:
+            js_count = 0
+            prog.step("JS from URLs — no source")
+
+        # Source 2: katana JS extraction (NEW)
+        if "katana" in available and alivef.exists() and not is_file_empty(alivef):
+            katana_js = jsdir / "katana_js.txt"
+            cmd = (f"katana -list {q(alivef)} -jc -d 3 -silent -c 5 -rl 20 -timeout 10 2>/dev/null "
+                   f"| grep -iE {q(r'\.js(\?|$)')} | sort -u > {q(katana_js)} || true")
+            run_cmd(cmd, timeout=900, tool_name="katana")
+            if katana_js.exists() and not is_file_empty(katana_js):
+                # Merge with existing
+                cmd2 = f"cat {q(js_file)} {q(katana_js)} 2>/dev/null | sort -u > {q(js_file)}.tmp && mv {q(js_file)}.tmp {q(js_file)}"
+                run_cmd(cmd2, timeout=60, tool_name="cat")
+                new_count = len(rlines(js_file))
+                prog.step(f"katana JS merge → {G}{new_count}{RST} total")
+            else:
+                prog.step("katana JS — 0 new")
+        else:
+            prog.step("katana JS — skipped")
+
+        secrets_file = jsdir / "secrets-found.txt"
+
+        if "trufflehog" in available and js_file.exists() and not is_file_empty(js_file):
+            outf = jsdir / "trufflehog.txt"
+            cmd = f"trufflehog filesystem --no-update --json {q(jsdir)} 2>/dev/null > {q(outf)} || true"
+            run_cmd(cmd, timeout=600, tool_name="trufflehog")
+            if not is_file_empty(outf):
+                shutil.copy2(outf, secrets_file)
+                print(f"  {G}✔{RST} secrets-found.txt — {len(rlines(secrets_file))} findings")
+        elif "mantra" in available and js_file.exists() and not is_file_empty(js_file):
+            outf = jsdir / "mantra.txt"
+            pattern = r"(api[_-]?key|secret|token|password|bearer|credential|private[_-]?key|client[_-]?secret|jwt)"
+            cmd = (f"mantra -s -ua 'Mozilla/5.0' -t 10 -d {q(js_file)} 2>/dev/null "
+                   f"| grep -iE {q(pattern)} | sort -u > {q(outf)}")
+            run_cmd(cmd, timeout=600, tool_name="mantra")
+            if not is_file_empty(outf):
+                shutil.copy2(outf, secrets_file)
+
+        # Regex fallback
+        if js_file.exists() and not is_file_empty(js_file) and (not secrets_file.exists() or is_file_empty(secrets_file)):
+            regex_file = jsdir / "regex-secrets.txt"
+            pattern = r"(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|sk_live_[0-9a-zA-Z]{24}|xox[baprs]-[0-9A-Za-z-]+|ghp_[0-9A-Za-z]{36})"
+            cmd = f"grep -hoE {q(pattern)} {q(js_file)} 2>/dev/null | sort -u > {q(regex_file)} || true"
+            run_cmd(cmd, timeout=60, tool_name="grep")
+            if not is_file_empty(regex_file):
+                shutil.copy2(regex_file, secrets_file)
+                print(f"  {G}✔{RST} secrets-found.txt — {len(rlines(secrets_file))} regex hits")
+
+        if not secrets_file.exists() or is_file_empty(secrets_file):
+            print(f"  {Y}[!]{RST} No secrets discovered")
+
+        prog.step(f"secret scan → {len(rlines(secrets_file)) if secrets_file.exists() else 0}")
+
+        prog.done_phase()
+        if args_verbose and secrets_file.exists() and not is_file_empty(secrets_file):
+            show_file_content(secrets_file, "secrets-found.txt", max_lines=30)
+        return {"js_file": str(js_file), "secrets_file": str(secrets_file)}
+    except KeyboardInterrupt:
+        log_warn("Phase 13 skipped")
+        return {"js_file": "", "secrets_file": ""}
+
+# ============================================================================
+# PHASE 14 — SCREENSHOTS
+# ============================================================================
+def phase_screenshots(domain, workspace, available):
+    if args_skip_screenshots:
+        log_warn("Screenshots skipped via flag")
+        return
+
+    adir = Path(workspace) / domain / "active"
+    alivef = adir / "alive-final.txt"
+    prog = PhaseProgress("14 — Screenshots", 2)
+
+    try:
+        if "gowitness" in available and alivef.exists() and not is_file_empty(alivef):
+            gw_dir = Path(workspace) / domain / "screenshots" / "gowitness"
+            mkd(gw_dir)
+            cmd = (f"gowitness scan file -f {q(alivef)} -q -t 10 --delay 1500 --timeout 15 "
+                   f"--screenshot-path {q(gw_dir)} --write-db")
+            run_cmd(cmd, timeout=1800, tool_name="gowitness")
+            prog.step(f"gowitness → {gw_dir}")
+        else:
+            prog.step("gowitness — skipped")
+
+        if "aquatone" in available and alivef.exists() and not is_file_empty(alivef):
+            aq_dir = Path(workspace) / domain / "screenshots" / "aquatone"
+            mkd(aq_dir)
+            cmd = f"cat {q(alivef)} | aquatone -out {q(aq_dir)} -silent -threads 10"
+            run_cmd(cmd, timeout=1800, tool_name="aquatone")
+            prog.step(f"aquatone → {aq_dir}")
+        else:
+            prog.step("aquatone — skipped")
+
+        prog.done_phase()
+    except KeyboardInterrupt:
+        log_warn("Phase 14 skipped")
+
+# ============================================================================
+# PHASE 15 — DNS ENRICHMENT
+# ============================================================================
+def phase_dns_enrichment(domain, workspace, available):
+    pdir = Path(workspace) / domain / "passive"
+    ddir = Path(workspace) / domain / "dns"
+    mkd(ddir)
+    subs_file = pdir / "allsubs_final.txt"
+    if not subs_file.exists():
+        subs_file = pdir / "allsubs.txt"
+    if not subs_file.exists() or is_file_empty(subs_file):
+        log_warn("No subdomains to enrich — skipping DNS phase")
+        return {"spf": "", "dmarc": "", "dns_records": ""}
+
+    prog = PhaseProgress("15 — DNS Enrichment", 3)
+    try:
+        if "dnsx" in available:
+            outf = ddir / "dns-resolved.txt"
+            cmd = f"dnsx -l {q(subs_file)} -silent -a -aaaa -cname -resp -r 8.8.8.8,1.1.1.1 -o {q(outf)}"
+            run_cmd(cmd, timeout=600, tool_name="dnsx")
+            if not is_file_empty(outf):
+                print(f"  {G}✔{RST} dns-resolved.txt — {len(rlines(outf))} records")
+            prog.step("dnsx resolution (A/AAAA/CNAME)")
+        else:
+            prog.step("dnsx — skipped")
+
+        spf_file = ddir / "spf.txt"
+        try:
+            _, out, _ = run_cmd(f"dig +short TXT {q(domain)} 2>/dev/null", timeout=30)
+            spf = [l for l in out.splitlines() if "v=spf1" in l]
+            wlines(spf_file, spf)
+            if spf:
+                print(f"  {G}✔{RST} SPF record found")
+            else:
+                print(f"  {Y}[!]{RST} No SPF record — potential email spoofing")
+        except Exception:
+            pass
+        prog.step("SPF record check")
+
+        dmarc_file = ddir / "dmarc.txt"
+        try:
+            _, out, _ = run_cmd(f"dig +short TXT _dmarc.{q(domain)} 2>/dev/null", timeout=30)
+            dmarc = [l for l in out.splitlines() if "v=DMARC1" in l]
+            wlines(dmarc_file, dmarc)
+            if dmarc:
+                print(f"  {G}✔{RST} DMARC record found")
+            else:
+                print(f"  {Y}[!]{RST} No DMARC record — potential email spoofing")
+        except Exception:
+            pass
+        prog.step("DMARC record check")
+
+        prog.done_phase()
+        return {
+            "spf": str(spf_file) if spf_file.exists() else "",
+            "dmarc": str(dmarc_file) if dmarc_file.exists() else "",
+            "dns_records": str(ddir / "dns-resolved.txt") if (ddir / "dns-resolved.txt").exists() else "",
+        }
+    except KeyboardInterrupt:
+        log_warn("Phase 15 skipped")
+        return {"spf": "", "dmarc": "", "dns_records": ""}
+
+# ============================================================================
+# SCORING
+# ============================================================================
+SCORE_TABLE = {
+    "takeover": 90,
+    "env_exposed": 95,
+    "git_exposed": 90,
+    "backup_exposed": 85,
+    "sensitive_passive": 80,
+    "cors_high": 85,
+    "cors_medium": 65,
+    "secret": 85,
+    "leakix": 80,
+    "nuclei_critical": 95,
+    "nuclei_high": 85,
+    "nuclei_medium": 70,
+    "dirsearch_hit": 75,
+    "ffuf_hit": 70,
+    "sensitive_sub": 60,
+    "no_spf": 55,
+    "no_dmarc": 50,
+    "403_host": 45,
+    "open_port_risky": 60,
+}
+
+def score_finding(kind, sub=None):
+    base = SCORE_TABLE.get(kind, 30)
+    if sub and sub.split(".")[0] in SENSITIVE_PREFIXES:
+        base = min(100, base + 10)
+    return base
+
+def build_findings_summary(result):
+    findings = []
+    for target in result.get("targets", []):
+        dom = target.get("domain", "")
+        for line in target.get("takeover", {}).get("findings", []):
+            findings.append({"score": score_finding("takeover", dom), "type": "takeover", "target": dom, "detail": line})
+        for line in target.get("vuln", {}).get("nuclei", []):
+            sev = "high"
+            if "[critical]" in line.lower():
+                sev = "critical"
+            elif "[medium]" in line.lower():
+                sev = "medium"
+            kind = "nuclei_" + sev
+            findings.append({"score": score_finding(kind, dom), "type": "nuclei-" + sev, "target": dom, "detail": line})
+        for line in target.get("vuln", {}).get("cors", []):
+            kind = "cors_high" if "HIGH" in line else "cors_medium"
+            findings.append({"score": score_finding(kind, dom), "type": "cors", "target": dom, "detail": line})
+        for line in target.get("vuln", {}).get("exposed", []):
+            kind = "env_exposed" if ".env" in line else ("git_exposed" if ".git" in line else "backup_exposed")
+            findings.append({"score": score_finding(kind, dom), "type": "exposed-file", "target": dom, "detail": line})
+
+        # Passive sensitive files
+        passive_sens = target.get("sensitive", {}).get("passive", "")
+        if passive_sens and Path(passive_sens).exists() and not is_file_empty(passive_sens):
+            for line in rlines(passive_sens):
+                findings.append({"score": score_finding("sensitive_passive", dom), "type": "sensitive-file", "target": dom, "detail": line[:200]})
+
+        # Secrets
+        secrets = target.get("js", {}).get("secrets_file", "")
+        if secrets and Path(secrets).exists() and not is_file_empty(secrets):
+            for line in rlines(secrets):
+                findings.append({"score": score_finding("secret", dom), "type": "secret", "target": dom, "detail": line[:200]})
+
+        # Sensitive subs
+        for s in target.get("passive", {}).get("sensitive_subs", []):
+            findings.append({"score": score_finding("sensitive_sub", s), "type": "sensitive-subdomain", "target": s, "detail": s})
+
+        # SPF/DMARC
+        spf_path = target.get("dns", {}).get("spf", "")
+        dmarc_path = target.get("dns", {}).get("dmarc", "")
+        if spf_path and not Path(spf_path).exists():
+            findings.append({"score": score_finding("no_spf", dom), "type": "no-spf", "target": dom, "detail": "No SPF record"})
+        if dmarc_path and not Path(dmarc_path).exists():
+            findings.append({"score": score_finding("no_dmarc", dom), "type": "no-dmarc", "target": dom, "detail": "No DMARC record"})
+
+    findings.sort(key=lambda f: f["score"], reverse=True)
+    return findings
+
+# ============================================================================
+# REPORTING
+# ============================================================================
+def safe(d, *keys, default=0):
+    for k in keys:
+        if isinstance(d, dict):
+            d = d.get(k, None)
+        else:
+            return default
+        if d is None:
+            return default
+    return d
+
+def write_txt(path, result, findings):
+    lines = [
+        "CLICKER v2.2 — BUG BOUNTY RECON REPORT",
+        "=" * 72,
+        f"Generated : {result['generated_at']}",
+        f"Findings  : {len(findings)}",
+        "",
+    ]
+    lines.append("TOP FINDINGS (by score)")
+    lines.append("-" * 72)
+    for f in findings[:30]:
+        lines.append(f"  [{f['score']:3d}] {f['type']:<22} {f['target']:<40} {f['detail'][:80]}")
+    lines.append("")
+
+    for t in result["targets"]:
+        lines += [
+            f"Target : {t['domain']}",
+            "-" * 40,
+            f"  Passive subdomains : {len(safe(t, 'passive', 'all_subdomains', default=[]))}",
+            f"  High-value subs    : {len(safe(t, 'passive', 'sensitive_subs', default=[]))}",
+            f"  Alive hosts        : {len(safe(t, 'response', 'alive', default=[]))}",
+            f"  403 hosts          : {len(safe(t, 'response', 'f403', default=[]))}",
+            f"  404 hosts          : {len(safe(t, 'response', 'f404', default=[]))}",
+            f"  WAF                : {safe(t, 'waf', 'waf_type', default='default')}",
+            "",
+        ]
+    Path(path).write_text("\n".join(lines), encoding="utf-8")
+
+def write_html(path, result, findings):
+    rows = []
+    for f in findings[:100]:
+        sev_cls = "critical" if f["score"] >= 85 else ("high" if f["score"] >= 70 else "medium")
+        rows.append(
+            f'<tr class="{sev_cls}"><td>{f["score"]}</td><td>{html.escape(f["type"])}</td>'
+            f'<td>{html.escape(f["target"])}</td><td>{html.escape(f["detail"][:200])}</td></tr>'
+        )
+
+    blocks = []
+    for t in result["targets"]:
+        blocks.append(f"""
+        <section>
+          <h2>🎯 {html.escape(t['domain'])}</h2>
+          <table>
+            <tr><td>Passive subdomains</td><td>{len(safe(t, 'passive', 'all_subdomains', default=[]))}</td></tr>
+            <tr><td>High-value subs</td><td>{len(safe(t, 'passive', 'sensitive_subs', default=[]))}</td></tr>
+            <tr><td>Alive hosts</td><td>{len(safe(t, 'response', 'alive', default=[]))}</td></tr>
+            <tr><td>WAF</td><td>{html.escape(str(safe(t, 'waf', 'waf_type', default='default')))}</td></tr>
+          </table>
+        </section>""")
+
+    doc = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Clicker Report</title>
+<style>
+body {{font-family: -apple-system, monospace; background: #060d1f; color: #d0d8f0; padding: 24px;}}
+h1 {{color: #7dd3fc;}}
+h2 {{color: #38bdf8; border-bottom: 1px solid #1e3a5f; padding-bottom: 6px;}}
+table {{border-collapse: collapse; width: 100%; margin: 10px 0;}}
+td, th {{border: 1px solid #1e3a5f; padding: 6px 12px; font-size: 13px;}}
+tr.critical {{background: #4a0d0d;}}
+tr.high {{background: #3a2409;}}
+tr.medium {{background: #102a3d;}}
+</style></head><body>
+<h1>⚡ Clicker v2.2 Report</h1>
+<p>Generated: {html.escape(result['generated_at'])} | Findings: {len(findings)}</p>
+<h2>Top Findings</h2>
+<table><thead><tr><th>Score</th><th>Type</th><th>Target</th><th>Detail</th></tr></thead>
+<tbody>{''.join(rows)}</tbody></table>
+{''.join(blocks)}
+</body></html>"""
+    Path(path).write_text(doc, encoding="utf-8")
+
+# ============================================================================
+# TARGETS PARSING
+# ============================================================================
+def parse_targets(single, tfile):
+    targets = []
+    if single:
+        try:
+            targets.append(validate_domain(single))
+        except ValueError as e:
+            sys.exit(f"{R}[!] {e}{RST}")
     if tfile:
-        p=Path(tfile)
-        if not p.exists(): sys.exit(f"{R}[!] targets file not found: {tfile}{RST}")
+        p = Path(tfile)
+        if not p.exists():
+            sys.exit(f"{R}[!] targets file not found: {tfile}{RST}")
         for line in p.read_text(encoding="utf-8").splitlines():
-            c=line.strip().lower()
-            if c and not c.startswith("#"): targets.append(c)
-    targets=sorted(set(targets))
-    if not targets: sys.exit(f"{R}[!] No targets. Use -t or --targets-file{RST}")
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                targets.append(validate_domain(line))
+            except ValueError as e:
+                log_warn(f"Skipping invalid target: {e}")
+    targets = sorted(set(targets))
+    if not targets:
+        sys.exit(f"{R}[!] No valid targets. Use -t or --targets-file{RST}")
     return targets
 
-def find_file_smart(filename, search_names=None):
-    if search_names is None: search_names = [filename]
-    found_files = []
-    for name in search_names:
-        _, out, _ = run_cmd(f"locate -i '{name}' 2>/dev/null | head -20", timeout=30, tool_name="locate")
-        if out:
-            for line in out.splitlines():
-                path = line.strip()
-                if path and os.path.isfile(path) and path.endswith('.txt'): found_files.append(path)
-    common_paths = ["/usr/share/seclists/Discovery/DNS/","/usr/share/wordlists/","/opt/wordlists/",os.path.expanduser("~/wordlists/"),"./wordlists/","/root/wordlists/"]
-    for cp in common_paths:
-        if os.path.isdir(cp):
-            for name in search_names:
-                candidate = os.path.join(cp, name)
-                if os.path.isfile(candidate) and candidate not in found_files: found_files.append(candidate)
-    return list(set(found_files))
-
-def ask_user_for_file(filename, found_files):
-    if not found_files:
-        print(f"  {Y}[!] {filename} not found in system{RST}")
-        user_path = input(f"  {DIM}Enter custom path for {filename} (or press Enter to skip): {RST}").strip()
-        if user_path and os.path.isfile(user_path): print(f"  {G}✔{RST} Using: {user_path}"); return user_path
-        return None
-    print(f"\n  {Y}[?] Found {len(found_files)} possible {filename} file(s):{RST}")
-    for i, f in enumerate(found_files[:5], 1): print(f"    {i}. {DIM}{f}{RST}")
-    if len(found_files) > 5: print(f"    {DIM}... and {len(found_files)-5} more{RST}")
-    while True:
-        choice = input(f"  {DIM}Use one of these? Enter number (1-{min(5,len(found_files))}), 'n' for custom path, or Enter to skip: {RST}").strip()
-        if choice == "" or choice.lower() == "skip": return None
-        elif choice.lower() == "n":
-            user_path = input(f"  {DIM}Enter custom path for {filename}: {RST}").strip()
-            if user_path and os.path.isfile(user_path): print(f"  {G}✔{RST} Using: {user_path}"); return user_path
-            print(f"  {R}[!] Invalid path{RST}")
-        elif choice.isdigit() and 1 <= int(choice) <= min(5, len(found_files)):
-            selected = found_files[int(choice)-1]
-            confirm = input(f"  {DIM}Use {selected}? (Y/n): {RST}").strip().lower()
-            if confirm == "" or confirm == "y": print(f"  {G}✔{RST} Using: {selected}"); return selected
-        else: print(f"  {R}[!] Invalid choice{RST}")
-
-def phase_passive(domain,workspace,api_keys,av):
-    global SKIP_CURRENT_PHASE
-    pdir=workspace/domain/"passive"; mkd(pdir); collected=set(); logs=[]
-    prog=PhaseProgress("1 — Passive Subdomain Enumeration",12); source_files=[]
-    try:
-        if "subfinder" in av:
-            outfile=pdir/f"{domain}_subfinder.txt"; cmd=f'subfinder -d {domain} -silent -all -rl 10 -timeout 30 -max-time 15 -o "{outfile}"'
-            _,out,err=run_cmd(cmd,timeout=480,tool_name="subfinder"); lines=rlines(outfile) if outfile.exists() else out.splitlines()
-            parsed={clean_sub(l,domain) for l in lines}; parsed={x for x in parsed if x}
-            wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed); logs.append({"tool":"subfinder","count":len(parsed),"stderr":err[:300]}); prog.step(f"subfinder — {G}{len(parsed)} subs{RST}"); source_files.append(outfile)
-        else: logs.append({"tool":"subfinder","status":"skipped","reason":"not installed"}); prog.step("subfinder — skipped")
-        if "sublist3r" in av:
-            outfile=pdir/f"{domain}_sublist3r.txt"; cmd=f'sublist3r -d {domain} -e "Google,Bing,Virustotal,Netcraft" -v -o "{outfile}"'
-            _,out,err=run_cmd(cmd,timeout=480,tool_name="sublist3r"); lines=rlines(outfile) if outfile.exists() else out.splitlines()
-            parsed={clean_sub(l,domain) for l in lines}; parsed={x for x in parsed if x}
-            wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed); logs.append({"tool":"sublist3r","count":len(parsed),"stderr":err[:300]}); prog.step(f"sublist3r — {G}{len(parsed)} subs{RST}"); source_files.append(outfile)
-        else: logs.append({"tool":"sublist3r","status":"skipped","reason":"not installed"}); prog.step("sublist3r — skipped")
-        if api_keys.get("CHAOS_API_KEY") and "chaos" in av:
-            outfile=pdir/f"{domain}_chaos.txt"; cmd=f'chaos -d {domain} -silent -key {api_keys["CHAOS_API_KEY"]}'
-            _,out,err=run_cmd(cmd,timeout=480,tool_name="chaos"); parsed={clean_sub(l,domain) for l in out.splitlines()}; parsed={x for x in parsed if x}
-            wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed); logs.append({"tool":"chaos","count":len(parsed),"stderr":err[:300]}); prog.step(f"chaos — {G}{len(parsed)} subs{RST}"); source_files.append(outfile)
-        if "assetfinder" in av:
-            outfile=pdir/f"{domain}_assetfinder.txt"; cmd=f'assetfinder --subs-only {domain}'; _,out,err=run_cmd(cmd,timeout=480,tool_name="assetfinder")
-            parsed={clean_sub(l,domain) for l in out.splitlines()}; parsed={x for x in parsed if x}
-            wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed); logs.append({"tool":"assetfinder","count":len(parsed),"stderr":err[:300]}); prog.step(f"assetfinder — {G}{len(parsed)} subs{RST}"); source_files.append(outfile)
-        if api_keys.get("GITHUB_TOKEN") and "github-subdomains" in av:
-            outfile=pdir/f"{domain}_github.txt"; cmd=f'github-subdomains -d {domain} -t {api_keys["GITHUB_TOKEN"]} -q -raw -o "{outfile}"'
-            _,out,err=run_cmd(cmd,timeout=480,tool_name="github-subdomains"); lines=rlines(outfile) if outfile.exists() else out.splitlines()
-            parsed={clean_sub(l,domain) for l in lines}; parsed={x for x in parsed if x}
-            wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed); logs.append({"tool":"github-subdomains","count":len(parsed),"stderr":err[:300]}); prog.step(f"github-subdomains — {G}{len(parsed)} subs{RST}"); source_files.append(outfile)
-        if "findomain" in av:
-            outfile=pdir/f"{domain}_findomain.txt"; cmd=f'findomain -t {domain} -q --rate-limit 1'; _,out,err=run_cmd(cmd,timeout=480,tool_name="findomain")
-            wlines(outfile,out.splitlines(),auto_cleanup=False); parsed={clean_sub(l,domain) for l in out.splitlines()}; parsed={x for x in parsed if x}
-            collected.update(parsed); logs.append({"tool":"findomain","count":len(parsed),"stderr":err[:300]}); prog.step(f"findomain — {G}{len(parsed)} subs{RST}"); source_files.append(outfile)
-        if "curl" in av and "jq" in av:
-            outfile=pdir/f"{domain}_crtsh.txt"; cmd=f'curl -s --max-time 30 --retry 2 --user-agent "Mozilla/5.0" "https://crt.sh/?q=%25.{domain}&output=json" | jq -r \'.[].name_value\' 2>/dev/null | grep -F "{domain}" | grep -v r"\\*\\." | sort -u'
-            _,out,err=run_cmd(cmd,timeout=480,tool_name="curl"); parsed={clean_sub(l,domain) for l in out.splitlines()}; parsed={x for x in parsed if x}
-            wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed); logs.append({"tool":"crt.sh","count":len(parsed),"stderr":err[:300]}); prog.step(f"crt.sh — {G}{len(parsed)} subs{RST}"); source_files.append(outfile)
-        if "waybackurls" in av:
-            outfile=pdir/f"{domain}_waybackurls.txt"; cmd=f'echo "{domain}" | waybackurls | sort -u | grep -vE r"\\.(jpg|png|gif|css|js|svg|ico)$" | grep -F "{domain}"'
-            _,out,err=run_cmd(cmd,timeout=480,tool_name="waybackurls"); parsed=extract_hosts_from_urls(out.splitlines(),domain); parsed={x for x in parsed if x}
-            wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed); logs.append({"tool":"waybackurls","count":len(parsed),"stderr":err[:300]}); prog.step(f"waybackurls — {G}{len(parsed)} subs{RST}"); source_files.append(outfile)
-        if "gau" in av:
-            outfile=pdir/f"{domain}_gau.txt"; cmd=f'echo "{domain}" | gau --subs --timeout 10 --threads 2 | grep -F "{domain}" | grep -v r"\\*\\." | grep -vE r"\\.(jpg|png|gif|css|js|svg|ico|woff|woff2|pdf)$" | sort -u'
-            _,out,err=run_cmd(cmd,timeout=480,tool_name="gau"); parsed=extract_hosts_from_urls(out.splitlines(),domain); parsed={x for x in parsed if x}
-            wlines(outfile,parsed,auto_cleanup=False); collected.update(parsed); logs.append({"tool":"gau","count":len(parsed),"stderr":err[:300]}); prog.step(f"gau — {G}{len(parsed)} subs{RST}"); source_files.append(outfile)
-        allsubs=pdir/"allsubs.txt"; wlines(allsubs,collected,auto_cleanup=False); prog.step(f"merge → {allsubs.name}")
-        existing_sources=[f for f in source_files if f.exists()]
-        if existing_sources: cleanup_source_files_after_merge(existing_sources,label="subdomain-tool-output")
-        sensitive=[s for s in collected if s.split(".")[0] in SENSITIVE_PREFIXES]; wlines(pdir/"high_value_subs.txt",sensitive)
-        if not cleanup_empty_file(pdir/"high_value_subs.txt","high-value"): print(f"  {G}✔{RST} high_value_subs.txt — {Y}{len(sensitive)} entries{RST}")
-        prog.done_phase(); print(f"  {BOLD}Total subdomains : {G}{len(collected)}{RST}\n  {BOLD}High-value subs  : {Y}{len(sensitive)}{RST}")
-        if args_verbose_output:
-            show_file_content(allsubs,"allsubs.txt - All Discovered Subdomains",max_lines=30)
-            if (pdir/"high_value_subs.txt").exists(): show_file_content(pdir/"high_value_subs.txt","high_value_subs.txt - High-Value Subdomains",max_lines=20)
-        return {"domain":domain,"allsubs_file":str(allsubs),"all_subdomains":sorted(collected),"sensitive_subs":sorted(sensitive),"tool_logs":logs}
-    except KeyboardInterrupt: print(f"{Y}[!] Phase 1 skipped by user{RST}"); return {"domain":domain,"allsubs_file":"","all_subdomains":[],"sensitive_subs":[],"tool_logs":[]}
-
-def phase_waf(domain,workspace,av):
-    global SKIP_CURRENT_PHASE, GLOBAL_WAF_TYPE
-    pdir=workspace/domain/"passive"; wdir=workspace/domain/"waf"; mkd(wdir)
-    high_val=pdir/"high_value_subs.txt"; allsubs=pdir/"allsubs.txt"
-    
-    prog=PhaseProgress("2 — WAF Detection",3)
-    waf_json=wdir/'waf-report.json'; waf_simple=wdir/'waf-detected.txt'
-    detected_waf = "default"
-    
-    try:
-        httpx_bin="httpx-toolkit" if "httpx-toolkit" in av else ("httpx" if "httpx" in av else None)
-        if httpx_bin and high_val.exists() and not is_file_empty(high_val):
-            httpx_out=wdir/"httpx-waf-check.txt"
-            cmd=f"{httpx_bin} -l {high_val} -sc -td -cl -server -title -ip -silent -t 15 -rl 8 -timeout 10 -retries 1 -random-agent -follow-redirects -o {httpx_out}"
-            run_cmd(cmd,timeout=600,tool_name=httpx_bin)
-            if httpx_out.exists():
-                for line in rlines(httpx_out):
-                    line_lower=line.lower()
-                    if 'cloudflare' in line_lower: detected_waf="cloudflare"; break
-                    elif 'akamai' in line_lower or 'edgekey' in line_lower: detected_waf="akamai"; break
-                    elif 'imperva' in line_lower or 'incapsula' in line_lower: detected_waf="imperva"; break
-            prog.step(f"httpx WAF scan → {G}{detected_waf}{RST}" if detected_waf!="default" else "httpx WAF scan → no WAF detected")
-        
-        
-        if detected_waf=="default" and "wafw00f" in av and high_val.exists() and not is_file_empty(high_val):
-            batch_prefix=str(wdir/"batch_")
-            cmd=f'split -l 50 {high_val} "{batch_prefix}" && for f in "{batch_prefix}"*; do wafw00f -i "$f" -a -T 10 --format json --no-colors; sleep 30; done >> "{waf_json}" && rm -f "{batch_prefix}"*'
-            run_cmd(cmd,timeout=1800,tool_name="wafw00f")
-            if waf_json.exists() and not is_file_empty(waf_json):
-                try:
-                    content=waf_json.read_text(encoding="utf-8")
-                    all_results=[]
-                    decoder=json.JSONDecoder()
-                    idx=0
-                    while idx<len(content):
-                        while idx<len(content) and content[idx] in ' \t\n\r': idx+=1
-                        if idx>=len(content): break
-                        try: 
-                            obj,idx=decoder.raw_decode(content,idx=idx)
-                            if isinstance(obj,list): all_results.extend(obj)
-                            elif isinstance(obj,dict): all_results.append(obj)
-                        except: break
-                    for entry in all_results:
-                        fw = entry.get('firewall', entry.get('waf', '')).lower()
-                        if 'cloudflare' in fw: detected_waf = "cloudflare"; break
-                        elif 'akamai' in fw or 'edgekey' in fw: detected_waf = "akamai"; break
-                        elif 'imperva' in fw or 'incapsula' in fw: detected_waf = "imperva"; break
-                except: pass
-            prog.step(f"wafw00f scan → {G}{detected_waf}{RST}" if detected_waf!="default" else "wafw00f scan → no WAF detected")
-        
-        
-        if detected_waf=="default" and high_val.exists():
-            waf_headers = {
-                "cloudflare": ["cf-ray", "cf-cache-status", "server: cloudflare"],
-                "akamai": ["akamai-grn", "x-akamai-transformed", "server: akamai"],
-                "imperva": ["x-cdn", "incap-signal", "server: imperva"],
-                "sucuri": ["x-sucuri-id", "x-sucuri-cache"],
-                "aws": ["x-amz-cf-id", "x-amz-request-id"]
-            }
-            for url in rlines(high_val)[:10]:
-                try:
-                    req = urllib.request.Request(url if url.startswith("http") else f"https://{url}", headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, timeout=5) as res:
-                        headers = {k.lower():v for k,v in res.headers.items()}
-                        for waf_name, indicators in waf_headers.items():
-                            if any(ind in headers.get('server','').lower() or ind in str(headers) for ind in indicators):
-                                detected_waf = waf_name
-                                break
-                    if detected_waf != "default": break
-                except: continue
-            prog.step(f"Header analysis → {G}{detected_waf}{RST}" if detected_waf!="default" else "Header analysis → no WAF detected")
-        
-        
-        if detected_waf != "default":
-            results = []
-            for url in rlines(high_val)[:20]:
-                results.append(f"{url:50} | {G}✓{RST} {detected_waf.upper()}")
-            if results:
-                header=f"{'URL':50} | WAF Detected\n{'-'*70}"
-                wlines(waf_simple, [header]+results, auto_cleanup=False)
-                print(f"  {G}✔{RST} WAF results → {waf_simple.name}")
-                print(f"  {G}✔{RST} WAFs detected: {C}{len(results)}{RST} hosts")
-        
-        cleanup_empty_file(waf_json,'waf-raw-json')
-        if not cleanup_empty_file(waf_simple,'waf-simple'):
-            print(f"  {Y}[!] No WAF detected or results empty{RST}")
-        
-        prog.done_phase()
-        GLOBAL_WAF_TYPE = detected_waf
-        print(f"{C}[*] Detected WAF Type: {detected_waf.upper()}{RST}")
-        
-        if args_verbose_output and waf_simple.exists() and not is_file_empty(waf_simple): 
-            show_file_content(waf_simple,"waf-detected.txt - WAF Detection Results",max_lines=30)
-        
-        return {"waf_file":str(waf_simple) if waf_simple.exists() else None, "waf_type": detected_waf}
-    
-    except KeyboardInterrupt: 
-        print(f"{Y}[!] Phase 2 skipped by user{RST}")
-        return {"waf_file":None, "waf_type":"default"}
-
-def phase_response_filter(domain,workspace,passive,av,active_result=None):
-    global SKIP_CURRENT_PHASE
-    adir=workspace/domain/"active"; mkd(adir)
-    
-    if active_result and isinstance(active_result, dict) and active_result.get("merged_file"):
-        allsubs_file = active_result["merged_file"]
-    elif isinstance(passive, dict) and passive.get("allsubs_file"):
-        allsubs_file = passive["allsubs_file"]
-    else:
-        allsubs_file = str(workspace/domain/"passive"/"allsubs.txt")
-    
-    high_val=str(workspace/domain/"passive"/"high_value_subs.txt")
-    prog=PhaseProgress("3 — Response Filtering",7)
-    results={"alive":[],"ports_alive":[],"f403":[],"f404":[],"details":[]}
-    httpx_bin="httpx-toolkit" if "httpx-toolkit" in av else ("httpx" if "httpx" in av else None)
-    waf_type = detect_waf(domain, workspace); httpx_opts = get_tool_options("httpx", waf_type)
-    
-    try:
-        if httpx_bin: cmd=f"{httpx_bin} -l {high_val} -sc -td -cl -server -title -ip -silent -t 15 -rl 8 -timeout 5 -retries 1 -random-agent -follow-redirects {httpx_opts} -o {adir/'details.txt'}"; run_cmd(cmd,timeout=600,tool_name=httpx_bin); results["details"]=rlines(adir/"details.txt")
-        prog.step("high-value details scan"); cleanup_empty_file(adir/"details.txt","details")
-        alive_file=adir/"alive.txt"
-        if httpx_bin: cmd=f"{httpx_bin} -l {allsubs_file} -mc 200,302 -silent -t 15 -rl 8 -timeout 5 -retries 1 -random-agent -follow-redirects {httpx_opts} -o {alive_file}"; run_cmd(cmd,timeout=900,tool_name=httpx_bin); results["alive"]=rlines(alive_file)
-        prog.step(f"alive 200/302 — {G}{len(results['alive'])} hosts{RST}")
-        alive2_file=adir/"2alive.txt"
-        if httpx_bin: cmd=f"{httpx_bin} -l {allsubs_file} -ports 80,8443,8080,8000 -silent -t 15 -rl 8 -timeout 5 -retries 1 -random-agent -follow-redirects {httpx_opts} -o {alive2_file}"; run_cmd(cmd,timeout=600,tool_name=httpx_bin)
-        prog.step("alive extra ports (80,8443,8080,8000)")
-        alive3_file=adir/"3alive.txt"
-        if "naabu" in av: naabu_opts = get_tool_options("naabu", waf_type); cmd=f"naabu -list {allsubs_file} -port 80,443,8000,8080 -silent -s s -rate 200 -c 10 -timeout 1500 -retries 1 {naabu_opts} -o {alive3_file}"; run_cmd(cmd,timeout=900,tool_name="naabu")
-        prog.step("naabu fallback liveness")
-        f403_file=adir/"403subs.txt"
-        if httpx_bin: cmd=f"{httpx_bin} -l {allsubs_file} -mc 403 -silent -t 15 -rl 8 -timeout 5 -retries 1 -random-agent -follow-redirects {httpx_opts} -o {f403_file}"; run_cmd(cmd,timeout=600,tool_name=httpx_bin); results["f403"]=rlines(f403_file)
-        prog.step(f"403 filter — {Y}{len(results['f403'])} hosts{RST}"); cleanup_empty_file(f403_file,"403")
-        f404_file=adir/"404subs.txt"
-        if httpx_bin: cmd=f"{httpx_bin} -l {allsubs_file} -mc 404 -silent -t 15 -rl 8 -timeout 5 -retries 1 -random-agent -follow-redirects {httpx_opts} -o {f404_file}"; run_cmd(cmd,timeout=600,tool_name=httpx_bin); results["f404"]=rlines(f404_file)
-        prog.step(f"404 filter — {R}{len(results['f404'])} hosts{RST}"); cleanup_empty_file(f404_file,"404")
-        source_files=[alive_file,alive2_file,alive3_file]; success_file=adir/"success-response.txt"
-        run_cmd(f"cat {alive_file} {alive2_file} {alive3_file} 2>/dev/null | sort -u > {success_file}", tool_name="cat"); prog.step("merge → success-response.txt")
-        cleanup_source_files_after_merge([f for f in source_files if f.exists()],label="response-filter"); prog.done_phase()
-        if args_verbose_output:
-            show_file_content(success_file,"success-response.txt - Alive Hosts (200/302)",max_lines=40)
-            if (adir/"details.txt").exists() and not is_file_empty(adir/"details.txt"): show_file_content(adir/"details.txt","details.txt - High-Value Host Details",max_lines=20)
-        return results
-    except KeyboardInterrupt: print(f"{Y}[!] Phase 3 skipped by user{RST}"); return {"alive":[],"ports_alive":[],"f403":[],"f404":[],"details":[]}
-
-def phase_tech_detect(domain,workspace,av,waf_type="default"):
-    global SKIP_CURRENT_PHASE
-    adir=workspace/domain/"active"; sucf=adir/"success-response.txt"; techf=adir/"subs-Tech.txt"; ipsf=adir/"ips.txt"; alivef=adir/"alive-final.txt"
-    prog=PhaseProgress("4 — Technology Detection & IP Extraction",3)
-    httpx_bin="httpx-toolkit" if "httpx-toolkit" in av else ("httpx" if "httpx" in av else None)
-    httpx_opts = get_tool_options("httpx", waf_type)
-    try:
-        if httpx_bin and sucf.exists(): cmd=f"{httpx_bin} -l {sucf} -r 8.8.8.8,1.1.1.1 -sc -td -cl -server -title -ip -fr -silent -t 15 -rl 8 -timeout 10 -retries 1 -random-agent {httpx_opts} -o {techf}"; run_cmd(cmd,timeout=1200,tool_name=httpx_bin)
-        prog.step(f"httpx tech detection → {techf.name}")
-        
-        
-        if techf.exists():
-            
-            cmd_ipv4 = f"grep -oE r'\\b(?:[0-9]{{1,3}}\\.){3}[0-9]{{1,3}}\\b' {techf} | sort -u > {ipsf}"
-            run_cmd(cmd_ipv4, timeout=300, tool_name="grep")
-            
-            cmd_ipv6 = f"grep -oE r'([0-9a-fA-F]{{1,4}}:){7}[0-9a-fA-F]{{1,4}}|::1' {techf} | sort -u >> {ipsf} 2>/dev/null || true"
-            run_cmd(cmd_ipv6, timeout=300, tool_name="grep")
-        prog.step(f"IP extraction → {ipsf.name}")
-        
-        if not cleanup_empty_file(ipsf,"ips"): print(f"  {G}✔{RST} ips.txt — {len(rlines(ipsf))} unique IPs{RST}")
-        
-        
-        if techf.exists():
-            
-            cmd=f"grep -E r'\\[(200|301|302)' {techf} | sed 's/\\x1b\\[[0-9;]*m//g' | awk '{{print $1}}' | sort -u > {alivef}"; run_cmd(cmd,timeout=300,tool_name="sed")
-        prog.step(f"alive-final re-filter → {alivef.name}")
-        
-        if not cleanup_empty_file(alivef,"alive-final"): print(f"  {G}✔{RST} alive-final.txt — {len(rlines(alivef))} hosts{RST}")
-        prog.done_phase()
-        if args_verbose_output: show_file_content(techf,"subs-Tech.txt - Technology Detection + IPs",max_lines=30); show_file_content(alivef,"alive-final.txt - Final Alive Hosts",max_lines=30)
-        return {"ips_file":str(ipsf),"alive_final":str(alivef)}
-    except KeyboardInterrupt: print(f"{Y}[!] Phase 4 skipped by user{RST}"); return {"ips_file":"","alive_final":""}
-
-def phase_ports(domain,workspace,av,waf_type="default"):
-    global SKIP_CURRENT_PHASE
-    adir=workspace/domain/"active"; pdir=workspace/domain/"passive"; ipsf=adir/"ips.txt"; allsubs=pdir/"allsubs_final.txt" if (pdir/"allsubs_final.txt").exists() else pdir/"allsubs.txt"; highval=pdir/"high_value_subs.txt"; prog=PhaseProgress("5 — Port Scanning",11)
-    naabu_opts = get_tool_options("naabu", waf_type)
-    nmap_opts = get_tool_options("nmap", waf_type)
-    try:
-        resolved=adir/"resolved-ips-full.txt"
-        if "dnsx" in av: cmd=f"dnsx -l {allsubs} -resp-only -a -silent -t 100 -retry 1 -timeout 200 -r 8.8.8.8,1.1.1.1 -o {resolved}"; run_cmd(cmd,timeout=300,tool_name="dnsx")
-        prog.step("dnsx resolve all subdomains"); all_ips=adir/"all-ips-final.txt"; merge_sources=[ipsf,resolved] if resolved.exists() else [ipsf]
-        cmd=f'{{ cat {ipsf} {resolved} 2>/dev/null || true; }} | grep -v \'\' | sort -u > {all_ips}'; run_cmd(cmd,timeout=300,tool_name="cat"); prog.step("merge all IPs → all-ips-final.txt"); cleanup_source_files_after_merge([f for f in merge_sources if f.exists()],label="ip-source")
-        if not is_file_empty(all_ips):
-            cdn_res,real_ips=adir/"cdn-results.txt",adir/"real-ips.txt"
-            if "cdncheck" in av: cmd=f"cat {all_ips} | cdncheck -silent -resp -r 8.8.8.8,1.1.1.1 -retry 1 -o {cdn_res}"; run_cmd(cmd,timeout=120,tool_name="cdncheck")
-            prog.step("CDN detection")
-            if "cdncheck" in av: cmd=f"cat {all_ips} | cdncheck -silent -resp -r 8.8.8.8,1.1.1.1 -retry 1 | grep -ivE 'cloudflare|akamai|fastly|cloudfront|incapsula|sucuri|aws|azure|google' | awk '{{print $1}}' | sort -u > {real_ips}"; run_cmd(cmd,timeout=120,tool_name="cdncheck")
-            prog.step("real-IP extraction")
-            if real_ips.exists() and not cleanup_empty_file(real_ips,"real-ips"): print(f"  {G}✔{RST} real-ips.txt — {len(rlines(real_ips))} non-CDN IPs{RST}")
-        else: print(f"{Y}[!] No IPs to scan — skipping CDN/port scans{RST}"); real_ips=adir/"real-ips.txt"; real_ips.touch()
-        open_ports_json,open_ports_txt=adir/"open-ports-full.json",adir/"open-ports-full.txt"
-        if "naabu" in av and real_ips.exists() and not is_file_empty(real_ips):
-            cmd=f"naabu -list {real_ips} -p {PORTS_FULL} -rate 300 -c 25 -retries 1 -timeout 1000 -Pn -s s -verify -scan-all-ips -ip-version 4 -silent -json {naabu_opts} -o {open_ports_json}"; run_cmd(cmd,timeout=600,tool_name="naabu")
-            if open_ports_json.exists():
-                formatted=[]
-                try:
-                    with open(open_ports_json,'r') as f:
-                        for line in f:
-                            line=line.strip()
-                            if not line: continue
-                            try:
-                                entry=json.loads(line)
-                                host=entry.get('host',entry.get('input',''))
-                                port=entry.get('port','')
-                                protocol=entry.get('protocol','tcp').upper()
-                                service=entry.get('service',{}).get('name','')
-                                version=entry.get('service',{}).get('version','')
-                                line_out=f"{host}:{port}/{protocol}"
-                                if service: line_out+=f" → {service}"
-                                if version: line_out+=f" ({version})"
-                                formatted.append(line_out)
-                            except: continue
-                    if formatted: wlines(open_ports_txt,formatted,auto_cleanup=False); print(f"  {G}✔{RST} Formatted port scan → {open_ports_txt.name}")
-                except: pass
-            cleanup_empty_file(open_ports_json,"raw-json")
-        prog.step("naabu full port scan + format output")
-        nmap_results=adir/"nmap-scripts.txt"
-        if "nmap" in av and open_ports_txt.exists() and not is_file_empty(open_ports_txt):
-            ips_to_scan=set()
-            for line in rlines(open_ports_txt): 
-                match=re.match(r'([^:/]+):\d+',line)
-                if match: ips_to_scan.add(match.group(1))
-            if ips_to_scan:
-                ip_list=adir/"nmap-targets.txt"; wlines(ip_list,ips_to_scan,auto_cleanup=False)
-                cmd=f"nmap -iL {ip_list} -sC -sV --open -T4 -Pn -n --version-light --max-retries 1 --host-timeout 10m --max-rate 200 -p 21,22,23,25,53,80,443,3306,3389,5432,6379,8080,8443,9200,27017 {nmap_opts} -oA {adir/'nmap-scripts'} --reason --open"; run_cmd(cmd,timeout=1800,tool_name="nmap")
-                if (adir/"nmap-scripts.nmap").exists(): cmd=f"grep -iE r'vuln(erability|erable)?|CVE-[0-9]{{4}}-[0-9]{{4,}}|sqli|xss|injection|exploit|weak|default.*cred|anonymous|auth.*bypass|priv.*escalat|misconfig' {adir/'nmap-scripts.nmap'} | grep -vE r'^#|^\\s*$|^Nmap scan report|^Host:|^Port:' | sort -u > {nmap_results}"; run_cmd(cmd,timeout=300,tool_name="grep")
-                if not cleanup_empty_file(nmap_results,"nmap-vulns"): print(f"  {G}✔{RST} nmap-scripts.txt — {C}{len(rlines(nmap_results))} potential findings{RST}")
-        prog.step("nmap -sC vulnerability scripts scan")
-        if not open_ports_txt.exists() or is_file_empty(open_ports_txt):
-            open_subs_json,open_subs_txt=adir/"open-ports-subs.json",adir/"open-ports-subs.txt"
-            if "naabu" in av: cmd=f"naabu -list {allsubs} -p {PORTS_FULL} -rate 200 -c 20 -retries 1 -timeout 1000 -Pn -s s -verify -scan-all-ips -ip-version 4 -silent -json {naabu_opts} -exclude-cdn -o {open_subs_json}"; run_cmd(cmd,timeout=600,tool_name="naabu")
-            if open_subs_json.exists():
-                formatted=[]
-                try:
-                    with open(open_subs_json,'r') as f:
-                        for line in f:
-                            line=line.strip()
-                            if not line: continue
-                            try: 
-                                entry=json.loads(line)
-                                host=entry.get('host',entry.get('input',''))
-                                port=entry.get('port','')
-                                protocol=entry.get('protocol','tcp').upper()
-                                service=entry.get('service',{}).get('name','')
-                                version=entry.get('service',{}).get('version','')
-                                line_out=f"{host}:{port}/{protocol}"
-                                if service: line_out+=f" → {service}"
-                                if version: line_out+=f" ({version})"
-                                formatted.append(line_out)
-                            except: continue
-                    if formatted: wlines(open_subs_txt,formatted,auto_cleanup=False); print(f"  {G}✔{RST} Formatted fallback scan → {open_ports_txt.name}")
-                except: pass
-            cleanup_empty_file(open_subs_json,"raw-json"); prog.step("naabu fallback scan + format"); cleanup_empty_file(open_subs_txt,"fallback-ports")
-        hv_ips=adir/"high-value-ips.txt"
-        if "dnsx" in av and highval.exists() and not is_file_empty(highval): cmd=f"dnsx -l {highval} -a -resp-only -silent -r 8.8.8.8,1.1.1.1,9.9.9.9 -t 50 -retry 1 -timeout 200 -o {hv_ips}"; run_cmd(cmd,timeout=120,tool_name="dnsx")
-        prog.step("dnsx resolve high-value subs")
-        if "nmap" in av and hv_ips.exists() and not is_file_empty(hv_ips): cmd=f"nmap -iL {hv_ips} -sC -sV --open -Pn -n -T4 --version-light --max-rate 150 --scan-delay 100ms --max-retries 1 --host-timeout 10m -p 21,22,23,25,53,80,443,3306,3389,5432,5900,6379,8080,8443,9200,27017 {nmap_opts} --script=banner,http-title,ssl-cert,vuln -oA {adir/'nmap-highvalue'} --reason"; run_cmd(cmd,timeout=1800,tool_name="nmap")
-        prog.step("nmap deep scan on high-value IPs")
-        shodan_out,shodan_err=adir/"shodan-results.txt",adir/"shodan-errors.log"
-        if api_keys_global.get("SHODAN_API") and "curl" in av and "jq" in av and ipsf.exists() and not is_file_empty(ipsf):
-            key=api_keys_global["SHODAN_API"]; script=f'while IFS= read -r ip; do [[ -z "$ip" || "$ip" =~ ^# ]] && continue; result=$(curl -s --max-time 15 --retry 1 --user-agent "Mozilla/5.0" "https://api.shodan.io/shodan/host/${{ip}}?key={key}" -H "Accept: application/json" 2>/dev/null); if echo "$result" | jq -e \'.error\' >/dev/null 2>&1; then error_msg=$(echo "$result" | jq -r \'.error // "Unknown error"\'); echo "[$(date +%H:%M:%S)] ⚠️ $ip: $error_msg" >&2; [[ "$error_msg" =~ [Rr]ate.*limit|[Ll]imit|429 ]] && sleep 10 || sleep 2; continue; else echo "$result" | jq -r --arg ip "$ip" r"\"\\($ip) | Ports: \\(.ports // [] | join(\", \")) | Vulns: \\(.vulns // [] | join(\", \")) | Org: \\(.org // \"N/A\") | Country: \\(.country_name // \"N/A\")\"" ; fi; sleep 1; done < <(grep -oE r\'^([0-9]{{1,3}}\\\\.){{3}}[0-9]{{1,3}}$\' {ipsf} | sort -u) > {shodan_out} 2> {shodan_err}'
-            run_cmd(script,timeout=300,tool_name="curl")
-        prog.step("Shodan IP lookup"); cleanup_empty_file(shodan_out,"shodan"); prog.done_phase()
-        if args_verbose_output:
-            if open_ports_txt.exists() and not is_file_empty(open_ports_txt): show_file_content(open_ports_txt,"open-ports-full.txt - Discovered Open Ports",max_lines=40)
-            if nmap_results.exists() and not is_file_empty(nmap_results): show_file_content(nmap_results,"nmap-scripts.txt - Potential Vulnerabilities",max_lines=30)
-        return {"open_ports_file":str(open_ports_txt) if open_ports_txt.exists() else None}
-    except KeyboardInterrupt: print(f"{Y}[!] Phase 5 skipped by user{RST}"); return {"open_ports_file":None}
-
-def phase_takeover(domain,workspace,av):
-    global SKIP_CURRENT_PHASE
-    adir=workspace/domain/"active"; tdir=workspace/domain/"takeover"; mkd(tdir); f404=adir/"404subs.txt"; prog=PhaseProgress("6 — Subdomain Takeover Detection",3)
-    try:
-        if "subzy" in av and f404.exists() and not is_file_empty(f404): subzy_out=tdir/'subzy-results.txt'; cmd=f'subzy run --targets {f404} --concurrency 5 --timeout 8 --hide_fails --vuln | tee {subzy_out}'; run_cmd(cmd,timeout=600,tool_name="subzy"); cleanup_empty_file(subzy_out,'subzy')
-        prog.step("subzy takeover check")
-        if "subjack" in av and f404.exists() and not is_file_empty(f404): subjack_out=tdir/'subjack-results.json'; cmd=f'subjack -w {f404} -t 8 -timeout 10 -ssl -o {subjack_out}'; run_cmd(cmd,timeout=600,tool_name="subjack"); cleanup_empty_file(subjack_out,'subjack')
-        prog.step("subjack takeover check")
-        if "nuclei" in av and f404.exists() and not is_file_empty(f404):
-            nuclei_out=tdir/'nuclei-takeover.txt'; tpl=Path("takeover.yaml"); base_cmd=f"nuclei -list {f404} -t {tpl} -silent" if tpl.exists() else f"nuclei -list {f404} -tags takeover -silent"
-            cmd=f'{base_cmd} -rl 10 -c 5 -timeout 8 -retries 1 -fr -no-interactsh -nmhe -headless-concurrency 1 -headless-bulk-size 1 | tee {nuclei_out}'; run_cmd(cmd,timeout=1200,tool_name="nuclei"); cleanup_empty_file(nuclei_out,'nuclei-takeover')
-        prog.step("nuclei takeover template"); prog.done_phase()
-        if args_verbose_output:
-            for fname in ['subzy-results.txt','subjack-results.json','nuclei-takeover.txt']:
-                fpath=tdir/fname
-                if fpath.exists() and not is_file_empty(fpath): show_file_content(fpath,f"{fname} - Takeover Findings",max_lines=20)
-        return {"takeover_dir":str(tdir)}
-    except KeyboardInterrupt: print(f"{Y}[!] Phase 6 skipped by user{RST}"); return {"takeover_dir":str(tdir)}
-
-def phase_screenshots(domain,workspace,av):
-    global SKIP_CURRENT_PHASE
-    adir=workspace/domain/"active"; alivef=adir/"alive-final.txt"; prog=PhaseProgress("7 — Screenshots",2)
-    try:
-        if "aquatone" in av and alivef.exists(): aq_dir=workspace/domain/"screenshots"/"aquatone"; mkd(aq_dir); cmd=f"cat {alivef} | aquatone -out {aq_dir} -silent -threads 10 -http-timeout 5000 -screenshot-timeout 20000"; run_cmd(cmd,timeout=1800,tool_name="aquatone"); prog.step(f"aquatone → {aq_dir}")
-        else: prog.step("aquatone — skipped")
-        if "gowitness" in av and alivef.exists(): gw_dir=workspace/domain/"screenshots"/"gowitness"; mkd(gw_dir); cmd=f"gowitness scan file -f {alivef} -q -t 10 --delay 1500 --timeout 15 --screenshot-path {gw_dir} --write-db"; run_cmd(cmd,timeout=1800,tool_name="gowitness"); prog.step(f"gowitness → {gw_dir}")
-        else: prog.step("gowitness — skipped")
-        prog.done_phase()
-        if args_verbose_output:
-            aq_html=workspace/domain/"screenshots"/"aquatone"/"aquatone.html"; gw_db=workspace/domain/"screenshots"/"gowitness"/"gowitness.db"
-            if aq_html.exists(): print(f"\n{BOLD}{C}📸 Aquatone screenshots:{RST} {DIM}{aq_html}{RST}")
-            if gw_db.exists(): print(f"{BOLD}{C}📸 Gowitness database:{RST} {DIM}{gw_db}{RST}")
-    except KeyboardInterrupt: print(f"{Y}[!] Phase 7 skipped by user{RST}")
-
-def phase_content_discovery(domain,workspace,av):
-    global SKIP_CURRENT_PHASE
-    adir=workspace/domain/"active"; alivef=adir/"alive-final.txt"; udir=workspace/domain/"urls"; mkd(udir); prog=PhaseProgress("8 — Content Discovery",5); url_files=[]
-    filter_pattern = r"\.(jpg|png|gif|css|js|svg|ico|woff|pdf|zip|tar|gz|map|woff2|ttf|eot|otf|webp|avif|mp[34]|webm|ogg|exe|dll|so)$"
-    try:
-        if "waybackurls" in av and alivef.exists(): uf=udir/"urls.txt"; cmd=f'cat {alivef} | waybackurls | grep -vE r"{filter_pattern}" | sort -u | tee {uf}'; run_cmd(cmd,timeout=900,tool_name="waybackurls"); url_files.append(uf)
-        prog.step("waybackurls")
-        if "gau" in av and alivef.exists(): uf=udir/"2urls.txt"; cmd=f'cat {alivef} | gau --threads 2 --timeout 10 | grep -vE r"{filter_pattern}" | sort -u | tee {uf}'; run_cmd(cmd,timeout=900,tool_name="gau"); url_files.append(uf)
-        prog.step("gau")
-        if "katana" in av and alivef.exists(): uf=udir/"3urls.txt"; cmd=f'katana -list {alivef} -d 3 -jc -kf all -o {uf} -silent -c 5 -rl 20 -hrl 3 -rd 1 -timeout 10 -retry 1 -fs rdn -ef png,jpg,gif,css,svg,ico,woff,woff2,pdf,map -iqp'; run_cmd(cmd,timeout=1200,tool_name="katana"); url_files.append(uf)
-        prog.step("katana")
-        if "waymore" in av and alivef.exists(): uf=udir/"4urls.txt"; cmd=f'waymore -i {alivef} -mode U -oU {uf} -p 2 -lr 300 -t 20 -r 1 -wrlr 5 -urlr 3 -fc "200,301,302" -ft "text/html,application/json,text/javascript" -ci d'; run_cmd(cmd,timeout=1200,tool_name="waymore"); url_files.append(uf)
-        prog.step("waymore"); final_urls=udir/"final-urls.txt"; run_cmd(f"cat {' '.join(str(f) for f in url_files)} 2>/dev/null | sort -u > {final_urls}", tool_name="cat"); prog.step("merge → final-urls.txt")
-        cleanup_source_files_after_merge([f for f in url_files if f.exists()],label="url-source")
-        if not final_urls.exists(): final_urls.touch()
-        if not is_file_empty(final_urls): print(f"  {G}✔{RST} final-urls.txt — {C}{len(rlines(final_urls))} unique URLs{RST}")
-        else: print(f"  {Y}[!] final-urls.txt is empty — no URLs discovered{RST}")
-        prog.done_phase()
-        if args_verbose_output: show_file_content(final_urls,"final-urls.txt - All Discovered URLs",max_lines=50)
-        return {"final_urls":str(final_urls)}
-    except KeyboardInterrupt: print(f"{Y}[!] Phase 8 skipped by user{RST}"); return {"final_urls":""}
-
-def phase_js_recon(domain,workspace,av):
-    global SKIP_CURRENT_PHASE
-    udir=workspace/domain/"urls"; jsdir=workspace/domain/"js"; mkd(jsdir); prog=PhaseProgress("9 — JS Recon & Secret Discovery",2); final_urls=udir/"final-urls.txt"
-    js_file=jsdir/'jsfiles.txt'
-    try:
-        if final_urls.exists() and not is_file_empty(final_urls): cmd=f'grep -iE r"\\\\.js([?&#]|$)" {final_urls} | grep -viE r"\\.(png|jpe?g|gif|svg|css|ico|woff2?|ttf|eot|otf|webp|avif|mp[34]|webm|ogg|pdf|zip|tar|gz|map)$" | grep -E r"^https?://[^[:space:]]+\\\\.js" | sed \'s/[?#].*$//\' | sort -u > {js_file}'; run_cmd(cmd,timeout=300,tool_name="grep")
-        js_count=len(rlines(js_file)) if js_file.exists() else 0
-        if js_count>0: print(f"  {G}✔{RST} jsfiles.txt — {C}{js_count} JS files{RST}")
-        else: print(f"  {Y}[!] No JS files found — skipping secret scans{RST}"); cleanup_empty_file(js_file,"js-list")
-        prog.step(f"JS file collection — {G}{js_count} files{RST}")
-        secrets_file=jsdir/'secrets-found.txt'
-        if "mantra" in av and js_file.exists() and js_count>0:
-            mantra_out=jsdir/'mantra-raw.txt'; cmd=f'mantra -s -ua \'Mozilla/5.0\' -t 10 -d {js_file} 2>/dev/null | grep -iE r"(api[_-]?key|secret|token|password|passwd|pwd|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer|credential|private[_-]?key|client[_-]?secret|jwt|session[_-]?id|csrf)" | grep -vE r"^[[:space:]]*$" | sort -u > {mantra_out}'; run_cmd(cmd,timeout=900,tool_name="mantra")
-            if not is_file_empty(mantra_out): shutil.copy2(mantra_out,secrets_file); print(f"  {G}✔{RST} secrets-found.txt — {C}{len(rlines(secrets_file))} potential secrets{RST}")
-            else: cleanup_empty_file(secrets_file,'secrets'); print(f"  {Y}[!] No secrets discovered{RST}")
-            cleanup_empty_file(mantra_out,'mantra-raw')
-        prog.step("mantra secret scan"); prog.done_phase()
-        if args_verbose_output and secrets_file.exists() and not is_file_empty(secrets_file): show_file_content(secrets_file,"secrets-found.txt - Potential API Keys/Secrets",max_lines=30)
-        return {"js_file":str(js_file),"secrets_file":str(secrets_file)}
-    except KeyboardInterrupt: print(f"{Y}[!] Phase 9 skipped by user{RST}"); return {"js_file":"","secrets_file":""}
-
-def phase_leakix(domain,workspace,av):
-    global SKIP_CURRENT_PHASE
-    adir=workspace/domain/"active"; ldir=workspace/domain/"leakix"; mkd(ldir); ipsf=adir/"ips.txt"; alivef=adir/"alive-final.txt"; prog=PhaseProgress("10 — LeakIX Exposure Check",2); key=api_keys_global.get("LEAKIX_API","")
-    leakix_ips_file,leakix_ips_err=ldir/'leakix-ips.txt',ldir/'leakix-errors.log'
-    try:
-        if key and "curl" in av and "jq" in av and ipsf.exists():
-            script=f'while IFS= read -r ip; do [[ -z "$ip" || ! "$ip" =~ ^([0-9]{{1,3}}\\\\.){{3}}[0-9]{{1,3}}$ ]] && continue; response=$(curl -s --max-time 15 --retry 1 --user-agent "Mozilla/5.0" "https://leakix.net/host/$ip" -H "api-key: {key}" -H "Accept: application/json" 2>/dev/null); if echo "$response" | jq -e \'.error\' >/dev/null 2>&1; then error_msg=$(echo "$response" | jq -r \'.error // "Unknown error"\'); echo "[$(date +%H:%M:%S)] ⚠️ $ip: $error_msg" >&2; [[ "$error_msg" =~ [Rr]ate.*limit|[Ll]imit|429 ]] && sleep 10 || sleep 2; continue; else echo "$response" | jq -r --arg ip "$ip" r\'".Services[]? | select((.leak.type != null and .leak.type != "") or (.port | IN(21,22,3306,5432,6379,27017,9200,1433,1521,3389,5900))) | "\\($ip) | Port: \\(.port) | Proto: \\(.protocol) | Software: \\(.software.name // "N/A") | Leak: \\(.leak.type // "None") | Version: \\(.software.version // "N/A")"\' 2>/dev/null; fi; sleep 1; done < <(grep -oE r\'^([0-9]{{1,3}}\\\\.){{3}}[0-9]{{1,3}}$\' {ipsf} 2>/dev/null | sort -u) | sort -u > {leakix_ips_file} 2> {leakix_ips_err}'
-            run_cmd(script,timeout=1800,tool_name="curl")
-            if not is_file_empty(leakix_ips_file): print(f"  {G}✔{RST} leakix-ips.txt — {C}{len(rlines(leakix_ips_file))} findings{RST}")
-        prog.step("LeakIX IP scan")
-        leakix_doms_file,leakix_doms_err=ldir/'leakix-domains.txt',ldir/'leakix-domains-errors.log'
-        if key and "curl" in av and "jq" in av and alivef.exists():
-            script=f'cat "{alivef}" | sed "s|https\\?://||; s|/.*||" | grep -E r\'^[a-zA-Z0-9.-]+\\.[a-zA-Z]{{2,}}$\' | sort -u | while IFS= read -r dom; do [[ -z "$dom" || "$dom" =~ ^# ]] && continue; response=$(curl -s --max-time 15 --retry 1 --user-agent "Mozilla/5.0" "https://leakix.net/domain/$dom" -H "api-key: {key}" -H "Accept: application/json" 2>/dev/null); if echo "$response" | jq -e \'.error\' >/dev/null 2>&1; then error_msg=$(echo "$response" | jq -r \'.error // "Unknown error"\'); echo "[$(date +%H:%M:%S)] ⚠️ $dom: $error_msg" >&2; [[ "$error_msg" =~ [Rr]ate.*limit|[Ll]imit|429 ]] && sleep 15 || sleep 3; continue; else echo "$response" | jq -r --arg dom "$dom" r\'.Services[]? | select((.leak.type != null and .leak.type != "") or (.port | IN(21,22,23,25,53,80,110,139,143,389,443,445,993,995,1433,1521,3306,3389,5432,5900,6379,8080,8443,9200,27017))) | "\\($dom) | Port: \\(.port) | Proto: \\(.protocol) | Software: \\(.software.name // "N/A") | Version: \\(.software.version // "N/A") | Leak: \\(.leak.type // "None") | Details: \\(.leak.details // "N/A")"\' 2>/dev/null; fi; sleep 1; done | sort -u > {leakix_doms_file} 2> {leakix_doms_err}'
-            run_cmd(script,timeout=2400,tool_name="curl")
-            if not is_file_empty(leakix_doms_file): print(f"  {G}✔{RST} leakix-domains.txt — {C}{len(rlines(leakix_doms_file))} findings{RST}")
-        prog.step("LeakIX domain scan")
-        if not key: print(f"  {Y}[!] LEAKIX_API not set — phase skipped{RST}")
-        prog.done_phase()
-        if args_verbose_output:
-            if leakix_ips_file.exists() and not is_file_empty(leakix_ips_file): show_file_content(leakix_ips_file,"leakix-ips.txt - IP Exposure Findings",max_lines=30)
-            if leakix_doms_file.exists() and not is_file_empty(leakix_doms_file): show_file_content(leakix_doms_file,"leakix-domains.txt - Domain Exposure Findings",max_lines=30)
-        return {"leakix_ips":str(leakix_ips_file),"leakix_domains":str(leakix_doms_file)}
-    except KeyboardInterrupt: print(f"{Y}[!] Phase 10 skipped by user{RST}"); return {"leakix_ips":"","leakix_domains":""}
-
-def write_txt(path,result):
-    lines=["CLICKER — BLACK-BOX RECON & ASSESSMENT REPORT","="*72,f"Generated : {result['generated_at']}",""]
-    for t in result["targets"]: 
-        lines+=[f"Target : {t['domain']}","-"*40,
-                f" Passive subdomains : {len(t['passive']['all_subdomains'])}",
-                f" Active subdomains  : {len(t.get('active',{}).get('active_subs',[]))}",
-                f" High-value subs : {len(t['passive']['sensitive_subs'])}",
-                f" Alive hosts (200/302): {len(t['response']['alive'])}",
-                f" 403 hosts : {len(t['response']['f403'])}",
-                f" 404 hosts : {len(t['response']['f404'])}",""]
-    path.write_text("\n".join(lines),encoding="utf-8")
-
-def write_html(path,result):
-    blocks=[]
-    for t in result["targets"]:
-        active_count=len(t.get('active',{}).get('active_subs',[]))
-        blocks.append(f"""<section><h2>🎯 {html.escape(t['domain'])}</h2><table>
-<tr><td>Passive subdomains</td><td>{len(t['passive']['all_subdomains'])}</td></tr>
-<tr><td>Active subdomains</td><td>{active_count}</td></tr>
-<tr><td>High-value subs</td><td>{len(t['passive']['sensitive_subs'])}</td></tr>
-<tr><td>Alive (200/302)</td><td>{len(t['response']['alive'])}</td></tr>
-<tr><td>403 hosts</td><td>{len(t['response']['f403'])}</td></tr>
-<tr><td>404 hosts</td><td>{len(t['response']['f404'])}</td></tr></table>
-<details><summary>Passive tool logs</summary><pre>{html.escape(json.dumps(t['passive']['tool_logs'],indent=2))}</pre></details>
-<details><summary>High-value subdomains</summary><pre>{html.escape(chr(10).join(t['passive']['sensitive_subs']))}</pre></details></section>""")
-    doc=f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Clicker Report</title>
-<style> body{{font-family:monospace;background:#060d1f;color:#d0d8f0;padding:24px;margin:0}} 
-h1{{color:#7dd3fc}} h2{{color:#38bdf8;border-bottom:1px solid #1e3a5f;padding-bottom:6px}} 
-table{{border-collapse:collapse;width:100%;margin:10px 0}} td{{border:1px solid #1e3a5f;padding:6px 12px}} 
-tr:first-child td{{background:#0f1e3d}} pre{{background:#0a1128;padding:12px;border-radius:6px;overflow:auto;white-space:pre-wrap}} 
-details{{margin:8px 0}} summary{{cursor:pointer;color:#7dd3fc}} </style></head><body> 
-<h1>⚡ Clicker Report</h1> <p>Generated: {html.escape(result['generated_at'])} | Follow: {INSTAGRAM}</p> 
-{''.join(blocks)} </body></html>"""
-    path.write_text(doc,encoding="utf-8")
-
-def write_pdf(path,result):
-    try: 
-        from reportlab.lib.pagesizes import A4
-        from reportlab.pdfgen import canvas as pdfcanvas
-    except ImportError: 
-        print(f"{Y}[!] reportlab not installed — skipping PDF (pip install reportlab){RST}")
-        return False
-    c=pdfcanvas.Canvas(str(path),pagesize=A4)
-    W_p,H=A4
-    y=H-40
-    c.setFont("Helvetica-Bold",15)
-    c.drawString(40,y,"Clicker — Black-box Assessment Report")
-    y-=20
-    c.setFont("Helvetica",9)
-    c.drawString(40,y,f"Generated: {result['generated_at']} | {INSTAGRAM}")
-    y-=22
-    for t in result["targets"]:
-        if y<140: 
-            c.showPage()
-            y=H-40
-        c.setFont("Helvetica-Bold",12)
-        c.drawString(40,y,f"Target: {t['domain']}")
-        y-=16
-        c.setFont("Helvetica",10)
-        active_count=len(t.get('active',{}).get('active_subs',[]))
-        rows=[f"Passive subdomains : {len(t['passive']['all_subdomains'])}",
-              f"Active subdomains  : {active_count}",
-              f"High-value subs : {len(t['passive']['sensitive_subs'])}",
-              f"Alive (200/302) : {len(t['response']['alive'])}",
-              f"403 hosts : {len(t['response']['f403'])}",
-              f"404 hosts : {len(t['response']['f404'])}"]
-        for row in rows: 
-            c.drawString(52,y,row)
-            y-=14
-        y-=8
-    c.save()
-    return True
-
+# ============================================================================
+# MAIN
+# ============================================================================
 def main():
-    global api_keys_global,args_show_results,args_verbose_output,args_skip_active_subs,args_resume
-    global args_wordlist,args_resolvers,RESUME_FILE,GLOBAL_USE_PROXYCHAINS,GLOBAL_HYBRID_PROXY,SKIP_CURRENT_PHASE, GLOBAL_WAF_TYPE
-    
+    global args_verbose, args_skip_screenshots, args_skip_js, args_skip_active_subs
+    global args_skip_vuln, args_skip_fuzz, args_keep_sources, args_resume, args_wordlist, args_resolvers
+    global api_keys_global, workspace_global, GLOBAL_USE_PROXYCHAINS, GLOBAL_HYBRID_PROXY
+    global GLOBAL_PROXY_HEALTH_OK, GLOBAL_WAF_TYPE, args_scope_file, args_force
+
     signal.signal(signal.SIGINT, signal_handler)
-    
-    if sys.platform!="linux": 
-        print(f"{Y}[!] Clicker is designed for Linux.{RST}")
-    
-    parser=argparse.ArgumentParser(description=f"Clicker {VERSION} — Black-box Recon Pipeline | {INSTAGRAM}")
-    parser.add_argument("-t","--target",help="Single target domain")
-    parser.add_argument("--targets-file",help="File with one domain per line")
-    parser.add_argument("--workspace",default="clicker_output")
-    parser.add_argument("--api-file",default="clicker_api.env")
-    parser.add_argument("--report-format",choices=["txt","html","both"],default="both")
-    parser.add_argument("--pdf",action="store_true")
-    parser.add_argument("--skip-screenshots",action="store_true")
-    parser.add_argument("--skip-js",action="store_true")
-    parser.add_argument("--skip-active-subs",action="store_true",help="Skip active subdomain enumeration")
-    parser.add_argument("--resume",action="store_true",help="Resume scan from last checkpoint")
+
+    if sys.platform != "linux":
+        log_warn("Clicker is designed for Linux — some features may not work")
+
+    parser = argparse.ArgumentParser(
+        description=f"Clicker {VERSION} — Bug Bounty Recon Pipeline | {INSTAGRAM}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("-t", "--target", help="Single target domain")
+    parser.add_argument("--targets-file", help="File with one domain per line")
+    parser.add_argument("--scope-file", help="Scope file (one pattern per line, prefix '!' to exclude)")
+    parser.add_argument("--workspace", default="clicker_output", help="Output directory")
+    parser.add_argument("--api-file", default="clicker_api.env", help="API keys file")
+    parser.add_argument("--report-format", choices=["txt", "html", "both"], default="both")
+    parser.add_argument("--skip-screenshots", action="store_true")
+    parser.add_argument("--skip-js", action="store_true")
+    parser.add_argument("--skip-active-subs", action="store_true")
+    parser.add_argument("--skip-vuln", action="store_true", help="Skip vulnerability scanning phase")
+    parser.add_argument("--skip-fuzz", action="store_true", help="Skip sensitive files / dirsearch / ffuf phase")
+    parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
+    parser.add_argument("--force", action="store_true", help="Force scan even if quick probe says target is dead")
     parser.add_argument("--proxy", help="Single proxy (user:pass@IP:PORT or IP:PORT)")
     parser.add_argument("--proxy-list", help="Path to proxy list file")
-    parser.add_argument("--auto-proxy", action="store_true", help="Fetch fresh proxies from public APIs automatically")
+    parser.add_argument("--auto-proxy", action="store_true", help="Fetch fresh proxies from public APIs")
     parser.add_argument("--rotate-proxy", action="store_true", help="Rotate proxies per target")
-    parser.add_argument("--proxychains", action="store_true", help="Route all tools via proxychains (requires proxychains4)")
-    parser.add_argument("--hybrid-proxy", action="store_true", help="Smart mode: use proxy only for HTTP tools, bypass for TCP/UDP tools + auto fallback")
-    parser.add_argument("--wordlist",default="/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt",help="Wordlist for active subdomain brute-force")
-    parser.add_argument("--resolvers",default="/usr/share/seclists/Discovery/DNS/resolvers.txt",help="Resolvers file for DNS queries")
-    parser.add_argument("--keep-sources",action="store_true",help="Keep source files after merge (debug mode)")
-    parser.add_argument("--show-phase-results",action="store_true",help="Show detailed results summary after each phase")
-    parser.add_argument("--verbose","-v",action="store_true",help="Show FULL output content in terminal after each phase")
-    
-    args=parser.parse_args()
+    parser.add_argument("--proxychains", action="store_true", help="Route all tools via proxychains4")
+    parser.add_argument("--hybrid-proxy", action="store_true", help="Smart: proxy only for HTTP tools")
+    parser.add_argument("--wordlist", default="/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt")
+    parser.add_argument("--resolvers", default="/usr/share/seclists/Discovery/DNS/resolvers.txt")
+    parser.add_argument("--keep-sources", action="store_true", help="Keep intermediate files")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output")
+
+    args = parser.parse_args()
+
     print(ASCII_LOGO)
-    
+
+    args_verbose = args.verbose
+    args_skip_screenshots = args.skip_screenshots
+    args_skip_js = args.skip_js
+    args_skip_active_subs = args.skip_active_subs
+    args_skip_vuln = args.skip_vuln
+    args_skip_fuzz = args.skip_fuzz
+    args_keep_sources = args.keep_sources
+    args_resume = args.resume
+    args_force = args.force
+    args_wordlist = args.wordlist
+    args_resolvers = args.resolvers
+    args_scope_file = args.scope_file
     GLOBAL_USE_PROXYCHAINS = args.proxychains
     GLOBAL_HYBRID_PROXY = args.hybrid_proxy
-    
-    pm = ProxyManager(proxy=args.proxy, proxy_file=args.proxy_list, auto_fetch=args.auto_proxy, rotate=args.rotate_proxy)
-    
+
+    pm = ProxyManager(
+        proxy=args.proxy,
+        proxy_file=args.proxy_list,
+        auto_fetch=args.auto_proxy,
+        rotate=args.rotate_proxy,
+    )
     if GLOBAL_HYBRID_PROXY and pm.proxies:
         test_proxy = pm.get_current()
-        if test_proxy and not check_proxy_health(test_proxy, timeout=8): 
-            print(f"{Y}[!] Initial proxy health check failed — will auto-bypass when needed{RST}")
+        if test_proxy and not check_proxy_health(test_proxy, timeout=8):
+            log_warn("Initial proxy health check failed — will auto-bypass when needed")
             GLOBAL_PROXY_HEALTH_OK = False
-        else: 
+        else:
             GLOBAL_PROXY_HEALTH_OK = True
-    
     pm.apply()
-    
-    args_show_results=args.show_phase_results
-    args_verbose_output=args.verbose
-    args_skip_active_subs=args.skip_active_subs
-    args_resume=args.resume
-    args_wordlist=args.wordlist
-    args_resolvers=args.resolvers
-    
-    api_keys_global=collect_api_keys(Path(args.api_file))
-    
-    targets = parse_targets(args.target, args.targets_file)
-    if not targets:
-        sys.exit(f"{R}[!] No targets to scan{RST}")
-    
-    workspace=Path(args.workspace)
-    mkd(workspace)
-    RESUME_FILE = workspace / ".clicker_resume.json"
-    
-    required_tools=["subfinder","sublist3r","chaos","assetfinder","github-subdomains","findomain",
-                   "waybackurls","gau","httpx","httpx-toolkit","naabu","dnsx","cdncheck","nmap",
-                   "aquatone","gowitness","katana","waymore","mantra","subzy","subjack","wafw00f",
-                   "puredns","altdns","shuffledns","dnsrecon","ffuf","curl","jq","grep","sed","awk","sort","cat"]
-    
-    available = check_tools(required_tools)
-    
-    result={"generated_at":datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z'),"targets":[]}
-    total_phases=10
-    
-    print(f"\n{BOLD}{M}[►] Starting scan on {len(targets)} target(s) — {total_phases} phases each{RST}\n")
-    
-    resume_state = load_checkpoint() if args_resume else {}
-    
-    for domain in targets:
-        pm.apply(domain=domain)
-        print(f"\n{BOLD}{W}{'━'*60}{RST}\n{BOLD}{M}  Target : {domain}{RST}\n{BOLD}{W}{'━'*60}{RST}")
-        
-        passive=active=response=tech=ports=takeover=waf=urls=js=leakix={}
-        skip_until = ""
-        
-        if args_resume and resume_state.get("domain") == domain and resume_state.get("completed"):
-            skip_until = resume_state.get("last_phase", "")
-            if skip_until: 
-                print(f"{G}[+] Resuming scan from phase: {skip_until}{RST}")
-            else: 
-                print(f"{Y}[!] No valid checkpoint found, starting from beginning.{RST}")
-        
-        GLOBAL_WAF_TYPE = "default"
-        
-        # ✅ Updated phase order: WAF is now Phase 2 (after passive)
-        phases = [
-            ("passive", lambda: phase_passive(domain,workspace,api_keys_global,available)),
-            ("waf", lambda: phase_waf(domain,workspace,available)),
-            ("response", lambda: phase_response_filter(domain,workspace,passive,available,active)),
-            ("tech", lambda: phase_tech_detect(domain,workspace,available,GLOBAL_WAF_TYPE)),
-            ("ports", lambda: phase_ports(domain,workspace,available,GLOBAL_WAF_TYPE)),
-            ("takeover", lambda: phase_takeover(domain,workspace,available)),
-            ("screenshots", lambda: phase_screenshots(domain,workspace,available) if not args.skip_screenshots else None),
-            ("content", lambda: phase_content_discovery(domain,workspace,available)),
-            ("js", lambda: phase_js_recon(domain,workspace,available) if not args.skip_js else None),
-            ("leakix", lambda: phase_leakix(domain,workspace,available)),
-        ]
-        
-        for phase_name, phase_func in phases:
-            if not skip_until or skip_until == phase_name:
-                skip_until = ""
-                if not args_resume or skip_until != phase_name:
-                    try:
-                        res = phase_func()
-                        if res is not None:
-                            if phase_name == "passive": passive = res
-                            elif phase_name == "waf": 
-                                waf = res
-                                GLOBAL_WAF_TYPE = res.get("waf_type", "default")
-                            elif phase_name == "response": response = res
-                            elif phase_name == "tech": tech = res
-                            elif phase_name == "ports": ports = res
-                            elif phase_name == "takeover": takeover = res
-                            elif phase_name == "content": urls = res
-                            elif phase_name == "js": js = res
-                            elif phase_name == "leakix": leakix = res
-                        save_checkpoint(phase_name)
-                    except KeyboardInterrupt:
-                        print(f"{Y}[!] Phase {phase_name} interrupted by user{RST}")
-                        continue
-            else:
-                print(f"{Y}[!] Skipping phase_{phase_name} (completed){RST}")
-        
-        result["targets"].append({
-            "domain":domain,"passive":passive,"active":active,"response":response,
-            "tech":tech,"ports":ports,"takeover":takeover,"waf":waf,
-            "urls":urls,"js":js,"leakix":leakix
-        })
-        
-        if RESUME_FILE.exists(): 
-            RESUME_FILE.unlink(missing_ok=True)
-        
-        if not args.keep_sources:
-            print(f"\n{DIM}🧹 Final cleanup for {domain}...{RST}")
-            target_dir=workspace/domain
-            for root,dirs,files in os.walk(target_dir,topdown=False):
-                for d in dirs:
-                    dp=Path(root)/d
-                    try:
-                        if not any(dp.iterdir()): 
-                            dp.rmdir()
-                            print(f"  {Y}[!]{RST} Removed empty directory: {dp.relative_to(workspace)}{RST}")
-                    except: pass
-            total_size=sum(f.stat().st_size for f in target_dir.rglob('*') if f.is_file())
-            print(f"  {G}✔{RST} Target workspace: {C}{total_size/1024:.1f} KB{RST} in {DIM}{target_dir.relative_to(workspace)}{RST}")
-    
-    print(f"\n{BOLD}{B}{'═'*60}{RST}\n{BOLD}{C}  Writing Reports{RST}\n{BOLD}{B}{'═'*60}{RST}")
-    
-    json_path=workspace/"report.json"
-    json_path.write_text(json.dumps(result,indent=2),encoding="utf-8")
-    print(f"  {G}✔{RST} JSON  → {json_path}")
-    
-    if args.report_format in {"txt","both"}: 
-        tp=workspace/"report.txt"
-        write_txt(tp,result)
-        print(f"  {G}✔{RST} TXT   → {tp}")
-    
-    if args.report_format in {"html","both"}: 
-        hp=workspace/"report.html"
-        write_html(hp,result)
-        print(f"  {G}✔{RST} HTML  → {hp}")
-    
-    if args.pdf: 
-        pp=workspace/"report.pdf"
-        if write_pdf(pp,result): 
-            print(f"  {G}✔{RST} PDF   → {pp}")
-    
-    print(f"\n{BOLD}{G}[✔] Clicker {VERSION} completed. Output → {workspace}/{RST}\n{DIM}Follow updates: {Y}{INSTAGRAM}{RST}\n")
 
-if __name__=="__main__": 
+    api_keys_global = collect_api_keys(Path(args.api_file))
+    scope = load_scope(args.scope_file)
+    targets = parse_targets(args.target, args.targets_file)
+
+    workspace = Path(args.workspace)
+    mkd(workspace)
+    workspace_global = workspace
+
+    required_tools = [
+        "subfinder", "sublist3r", "chaos", "assetfinder", "github-subdomains",
+        "findomain", "waybackurls", "gau", "httpx", "httpx-toolkit", "naabu",
+        "dnsx", "cdncheck", "nmap", "aquatone", "gowitness", "katana",
+        "waymore", "mantra", "subzy", "subjack", "wafw00f", "puredns",
+        "altdns", "shuffledns", "dnsrecon", "ffuf", "nuclei", "trufflehog",
+        "gitleaks", "curl", "jq", "grep", "sed", "awk", "sort", "cat", "dig",
+        "unfurl", "uro", "dirsearch",
+    ]
+    available = check_tools(required_tools)
+
+    result = {
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "version": VERSION,
+        "targets": [],
+    }
+
+    print(f"\n{BOLD}{M}[►] Starting scan on {len(targets)} target(s){RST}\n")
+
+    for domain in targets:
+        if not in_scope(domain, scope):
+            log_warn(f"OUT OF SCOPE: {domain} — skipping")
+            continue
+
+        pm.apply(domain=domain)
+        print(f"\n{BOLD}{W}{'━' * 60}{RST}")
+        print(f"{BOLD}{M}  Target : {domain}{RST}")
+        print(f"{BOLD}{W}{'━' * 60}{RST}")
+
+        completed = set()
+        if args_resume:
+            cp = load_checkpoint(workspace, domain)
+            if cp:
+                completed = set(cp.get("completed_phases", []))
+                log_ok(f"Resuming — completed phases: {sorted(completed)}")
+
+        # Storage
+        quick = {}
+        passive = {}
+        waf = {}
+        dns_resolution = {}
+        response = {}
+        tech = {}
+        takeover = {}
+        vuln = {}
+        ports = {}
+        leakix = {}
+        urls = {}
+        sensitive = {}
+        js = {}
+        dns_res = {}
+
+        def make_phases():
+            return [
+                ("quick",           lambda: phase_quick_probe(domain, workspace)),
+                ("passive",         lambda: phase_passive(domain, workspace, api_keys_global, available)),
+                ("waf",             lambda: phase_waf(domain, workspace, available)),
+                ("active",          lambda: phase_active_subs(domain, workspace, available)),
+                ("dns_resolution",  lambda: phase_dns_resolution(domain, workspace, available)),
+                ("response",        lambda: phase_response_filter(domain, workspace, passive, available)),
+                ("tech",            lambda: phase_tech_detect(domain, workspace, available)),
+                ("takeover",        lambda: phase_takeover(domain, workspace, available)),
+                ("vuln",            lambda: phase_vuln_scan(domain, workspace, available)),
+                ("ports",           lambda: phase_ports(domain, workspace, available)),
+                ("leakix",          lambda: phase_leakix(domain, workspace, available)),
+                ("content",         lambda: phase_content_discovery(domain, workspace, available)),
+                ("sensitive",       lambda: phase_sensitive_files(domain, workspace, available)),
+                ("js",              lambda: phase_js_recon(domain, workspace, available)),
+                ("screenshots",     lambda: phase_screenshots(domain, workspace, available)),
+                ("dns",             lambda: phase_dns_enrichment(domain, workspace, available)),
+            ]
+
+        for phase_name, phase_fn in make_phases():
+            if phase_name in completed:
+                log_warn(f"Skipping {phase_name} (already completed)")
+                continue
+
+            if phase_name == "quick":
+                try:
+                    res = phase_fn()
+                    quick = res if res else {}
+                    completed.add(phase_name)
+                    save_checkpoint(workspace, domain, completed, extra={"waf_type": GLOBAL_WAF_TYPE})
+                    if quick.get("skip_scan") and not args_force:
+                        log_err(f"Target {domain} appears dead — skipping remaining phases")
+                        log_dim("  Use --force to override")
+                        break
+                except KeyboardInterrupt:
+                    log_warn("Quick probe interrupted — continuing anyway")
+                    completed.add(phase_name)
+                    save_checkpoint(workspace, domain, completed, extra={"waf_type": GLOBAL_WAF_TYPE})
+                continue
+
+            try:
+                res = phase_fn()
+                if res is None:
+                    res = {}
+                if phase_name == "passive":
+                    passive = res
+                elif phase_name == "waf":
+                    waf = res
+                elif phase_name == "dns_resolution":
+                    dns_resolution = res
+                elif phase_name == "response":
+                    response = res
+                elif phase_name == "tech":
+                    tech = res
+                elif phase_name == "takeover":
+                    takeover = res
+                elif phase_name == "vuln":
+                    vuln = res
+                elif phase_name == "ports":
+                    ports = res
+                elif phase_name == "leakix":
+                    leakix = res
+                elif phase_name == "content":
+                    urls = res
+                elif phase_name == "sensitive":
+                    sensitive = res
+                elif phase_name == "js":
+                    js = res
+                elif phase_name == "dns":
+                    dns_res = res
+                completed.add(phase_name)
+                save_checkpoint(workspace, domain, completed, extra={"waf_type": GLOBAL_WAF_TYPE})
+            except KeyboardInterrupt:
+                log_warn(f"Phase {phase_name} interrupted")
+                completed.add(phase_name)
+                save_checkpoint(workspace, domain, completed, extra={"waf_type": GLOBAL_WAF_TYPE})
+                continue
+            except Exception as e:
+                log_err(f"Phase {phase_name} failed: {e}")
+                continue
+
+        result["targets"].append({
+            "domain": domain,
+            "quick": quick,
+            "passive": passive,
+            "waf": waf,
+            "dns_resolution": dns_resolution,
+            "response": response,
+            "tech": tech,
+            "takeover": takeover,
+            "vuln": vuln,
+            "ports": ports,
+            "leakix": leakix,
+            "urls": urls,
+            "sensitive": sensitive,
+            "js": js,
+            "dns": dns_res,
+        })
+
+        clear_checkpoint(workspace)
+
+    findings = build_findings_summary(result)
+    result["findings"] = findings
+
+    print(f"\n{BOLD}{B}{'═' * 60}{RST}")
+    print(f"{BOLD}{C}  Writing Reports{RST}")
+    print(f"{BOLD}{B}{'═' * 60}{RST}")
+
+    json_path = workspace / "report.json"
+    json_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+    print(f"  {G}✔{RST} JSON  → {json_path}")
+
+    if args.report_format in ("txt", "both"):
+        tp = workspace / "report.txt"
+        write_txt(tp, result, findings)
+        print(f"  {G}✔{RST} TXT   → {tp}")
+
+    if args.report_format in ("html", "both"):
+        hp = workspace / "report.html"
+        write_html(hp, result, findings)
+        print(f"  {G}✔{RST} HTML  → {hp}")
+
+    print(f"\n{BOLD}{G}[✔] Clicker {VERSION} complete → {workspace}/{RST}")
+    if findings:
+        print(f"{BOLD}{Y}Top finding score: {findings[0]['score']} — {findings[0]['type']}{RST}")
+    print(f"{DIM}Follow updates: {Y}{INSTAGRAM}{RST}\n")
+
+if __name__ == "__main__":
     main()
