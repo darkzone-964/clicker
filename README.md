@@ -1,4 +1,4 @@
-```markdown
+markdown
 ![Version](https://img.shields.io/badge/Version-2.2.0-blue?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.8+-yellow?style=for-the-badge&logo=python)
 ![Platform](https://img.shields.io/badge/Platform-Linux-orange?style=for-the-badge&logo=linux)
