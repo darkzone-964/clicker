@@ -1,37 +1,33 @@
 ```markdown
-<p align="center">
-  <img src="https://img.shields.io/badge/Version-2.2.0-blue?style=for-the-badge" alt="Version">
-  <img src="https://img.shields.io/badge/Python-3.8+-yellow?style=for-the-badge&logo=python" alt="Python">
-  <img src="https://img.shields.io/badge/Platform-Linux-orange?style=for-the-badge&logo=linux" alt="Platform">
-  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
-</p>
+![Version](https://img.shields.io/badge/Version-2.2.0-blue?style=for-the-badge)
+![Python](https://img.shields.io/badge/Python-3.8+-yellow?style=for-the-badge&logo=python)
+![Platform](https://img.shields.io/badge/Platform-Linux-orange?style=for-the-badge&logo=linux)
+![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
-<p align="center">
-  <pre>
+```
   .__  .__        __
 ____ |  | |__| ____ |  | __ ___________
 _/ ___\|  | |  |/ ___\|  |/ // __ \_  __ \
 \  \___|  |_|  \  \___|    <\  ___/|  | \/
  \___  >____/__|\___  >__|_ \\___  >__|
      \/             \/     \/    \/
-  </pre>
-  <h3 align="center">Next-Gen Black-box Recon & Bug Bounty Pipeline</h3>
-  <p align="center">Automated, Intelligent, and WAF-Aware Reconnaissance for Security Researchers.</p>
-  <p align="center">
-    <a href="#-quick-start"><strong>Get Started »</strong></a>
-    ·
-    <a href="https://instagram.com/403_linux">Follow @403_linux</a>
-  </p>
-</p>
+```
+
+### Next-Gen Black-box Recon & Bug Bounty Pipeline
+
+**Automated, Intelligent, and WAF-Aware Reconnaissance for Security Researchers.**
+
+[**Get Started »**](#-quick-start) · [Follow @403_linux](https://instagram.com/403_linux)
 
 ---
 
 ## 📑 Table of Contents
+
 - [🌟 Why Clicker?](#-why-clicker)
 - [🧠 AI-Powered Orchestration](#-ai-powered-orchestration)
 - [⚡ Key Features](#-key-features)
 - [🚀 Quick Start](#-quick-start)
-- [⚙️ Advanced Usage](#️-advanced-usage)
+- [️ Advanced Usage](#️-advanced-usage)
 - [📂 Output Structure](#-output-structure)
 - [🔄 Reconnaissance Phases](#-reconnaissance-phases)
 - [⚠️ Disclaimer](#️-disclaimer)
@@ -61,8 +57,8 @@ Clicker features a built-in `ai_orchestrator.py` that acts as a smart middleware
 | :--- | :--- |
 | **🔍 Passive Recon** | Streamlined, high-yield discovery using `subfinder`, `chaos`, and `waymore+unfurl`. |
 | **🎯 Active Discovery** | Intelligent bruteforce (`puredns` + `massdns`), permutations (`altdns`), and AXFR checks (`dnsrecon`). |
-| **🛡️ WAF Awareness** | Auto-detects Cloudflare/Akamai and dynamically adjusts tool timeouts and rate limits to prevent IP bans. |
-| **🕵️ Vulnerability Checks** | Subdomain takeover (`subzy`, `nuclei`), sensitive file fuzzing (`ffuf`, `dirsearch`), and JS secret extraction (`trufflehog`). |
+| **️ WAF Awareness** | Auto-detects Cloudflare/Akamai and dynamically adjusts tool timeouts and rate limits to prevent IP bans. |
+| **️ Vulnerability Checks** | Subdomain takeover (`subzy`, `nuclei`), sensitive file fuzzing (`ffuf`, `dirsearch`), and JS secret extraction (`trufflehog`). |
 | **🔐 IDOR Module** | Dedicated, configurable phase for testing Insecure Direct Object References with session persistence. |
 | **🌐 Smart Proxying** | Hybrid proxy mode: Routes HTTP tools through proxies while keeping DNS/Port scanners on direct connections for speed. |
 
@@ -71,6 +67,7 @@ Clicker features a built-in `ai_orchestrator.py` that acts as a smart middleware
 ## 🚀 Quick Start
 
 ### 1. Installation
+
 ```bash
 # Clone the repository
 git clone https://github.com/darkzone-964/clicker.git
@@ -87,9 +84,11 @@ chmod +x clicker.py
 ```
 
 ### 2. API Setup
+
 On the first run, Clicker will interactively prompt you to securely save your API keys (Chaos, VirusTotal, GitHub, etc.) into `clicker_api.env`.
 
 ### 3. Execute
+
 ```bash
 # Basic verbose scan
 python3 clicker.py -t example.com -v
@@ -102,19 +101,16 @@ python3 clicker.py --targets-file targets.txt --verbose
 
 ## ⚙️ Advanced Usage
 
-<details>
-<summary><strong>Click to expand advanced command examples</strong></summary>
-
-<br>
-
 **🛡️ Stealth / Passive-Only Mode**  
 *(Ideal for strict bug bounty programs that prohibit active scanning)*
+
 ```bash
 python3 clicker.py -t example.com --skip-active-subs --skip-vuln --skip-fuzz
 ```
 
 **🎯 IDOR Testing with Custom Authentication**  
 *(Requires prior recon data or runs alongside)*
+
 ```bash
 python3 clicker.py -t example.com --idor-only \
   --idor-login-url "https://example.com/api/login" \
@@ -123,10 +119,10 @@ python3 clicker.py -t example.com --idor-only \
 
 **🌐 Hybrid Proxy Rotation**  
 *(Fetches fresh proxies and rotates them, but keeps DNS tools direct)*
+
 ```bash
 python3 clicker.py -t example.com --auto-proxy --rotate-proxy --hybrid-proxy
 ```
-</details>
 
 ---
 
@@ -134,7 +130,7 @@ python3 clicker.py -t example.com --auto-proxy --rotate-proxy --hybrid-proxy
 
 Clicker organizes findings logically for easy triage and reporting:
 
-```text
+```
 clicker_output/
 └── target.com/
     ├── passive/          # Raw & merged subdomain lists, high-value targets
@@ -150,7 +146,7 @@ clicker_output/
 
 ---
 
-## 🔄 Reconnaissance Phases
+##  Reconnaissance Phases
 
 > *Clicker automatically skips phases based on program policies or target viability.*
 
@@ -176,7 +172,6 @@ The developer assumes no liability for any misuse or damage caused by this progr
 
 ---
 
-<p align="center">
-  <sub>Built with ❤️ by <a href="https://instagram.com/403_linux">@403_linux</a></sub>
-</p>
+Built with ❤️ by [@403_linux](https://instagram.com/403_linux)
 ```
+
