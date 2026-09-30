@@ -1,12 +1,14 @@
 """
-IDOR Testing Module for Clicker v2.3
+IDOR Testing Module for Clicker v2.0
 Auto-login, session extraction, active IDOR testing.
 Save as: ~/idor_module.py
 """
 import base64
+import datetime
 import json
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 from pathlib import Path
@@ -16,18 +18,38 @@ R, G, Y, B, M, C, W = "\033[91m", "\033[92m", "\033[93m", "\033[94m", "\033[95m"
 DIM, RST, BOLD = "\033[2m", "\033[0m", "\033[1m"
 
 # ============================================================================
+# GLOBAL CONFIG (set by clicker.py before calling phase_idor)
+# ============================================================================
+GLOBAL_SCOPE = None
+GLOBAL_LOGIN_URL = None
+GLOBAL_LOGIN_JSON = None
+GLOBAL_EXTRA_HEADERS = []
+GLOBAL_RATE_LIMIT = 5.0
+
+# ============================================================================
 # CONSTANTS
 # ============================================================================
 LOGIN_PATHS = [
-    "/login", "/signin", "/api/login", "/api/auth/login",
-    "/api/v1/login", "/api/v1/auth/login", "/auth/login",
-    "/auth/signin", "/users/login", "/account/login",
-    "/api/session", "/api/token", "/api/users/sign_in",
-    "/identity/api/auth/login", "/identity/api/auth/signup",
+    # API-style paths first (most common in modern apps)
+    "/identity/api/auth/login",
+    "/api/auth/login",
+    "/api/v1/auth/login",
+    "/auth/login",
+    "/api/login",
+    "/api/v1/login",
+    "/api/token",
+    "/api/session",
+    # Traditional paths last
+    "/login",
+    "/signin",
+    "/auth/signin",
+    "/users/login",
+    "/account/login",
+    "/api/users/sign_in",
 ]
 
-EMAIL_FIELDS = ["email", "username", "user", "login", "user_email", "userEmail"]
-PASS_FIELDS = ["password", "pass", "passwd", "pwd", "user_password", "userPassword"]
+EMAIL_FIELDS = ["email", "username", "user"]
+PASS_FIELDS = ["password", "pass"]
 
 ME_PATHS = [
     "/api/me", "/api/v1/me", "/api/user", "/api/v1/user",
@@ -52,7 +74,15 @@ GRAPHQL_PATHS = [
 def curl_request(url, method="GET", cookies=None, headers=None, data=None,
                  content_type=None, timeout=15, follow=True):
     """Execute a curl request and return structured result."""
+    import os as _os
     cmd = ["curl", "-sS", "-k", "--max-time", str(timeout)]
+
+    # Use workspace-local .curlrc if available (set by clicker.py)
+    _curl_home = _os.environ.get("CURL_HOME")
+    if _curl_home:
+        _curlrc_file = Path(_curl_home) / ".curlrc"
+        if _curlrc_file.exists():
+            cmd += ["--config", str(_curlrc_file)]
 
     if follow:
         cmd += ["-L", "--max-redirs", "5"]
@@ -66,6 +96,11 @@ def curl_request(url, method="GET", cookies=None, headers=None, data=None,
     all_headers = {"User-Agent": "Mozilla/5.0 Clicker/2.3"}
     if headers:
         all_headers.update(headers)
+    # Global program headers (X-Bug-Bounty, etc.)
+    for gh in GLOBAL_EXTRA_HEADERS:
+        if ":" in gh:
+            k, _, v = gh.partition(":")
+            all_headers[k.strip()] = v.strip()
     if content_type:
         all_headers["Content-Type"] = content_type
     for k, v in all_headers.items():
@@ -87,7 +122,8 @@ def curl_request(url, method="GET", cookies=None, headers=None, data=None,
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout + 5
+            cmd, capture_output=True, text=True, errors="replace",
+            timeout=timeout + 5
         )
     except subprocess.TimeoutExpired:
         return {"status": 0, "body": "", "headers": {}, "error": "timeout"}
@@ -147,12 +183,58 @@ def detect_csrf_token(html_body):
     return None
 
 
-def try_login(domain, email, password):
+def try_login(domain, email, password, custom_url=None, custom_json=None):
     """
     Try to login using common patterns. Returns session dict.
+    If custom_url and custom_json are provided, try those first.
+    custom_json is a JSON template with %EMAIL% and %PASS% placeholders.
     """
     base = f"https://{domain}"
     http_base = f"http://{domain}"
+
+    # ===== CUSTOM LOGIN (highest priority) =====
+    if custom_url and custom_json:
+        print(f"  {DIM}[custom login] Trying {custom_url}{RST}")
+        try:
+            payload_str = custom_json.replace("%EMAIL%", email).replace("%PASS%", password)
+            payload = json.loads(payload_str)
+        except Exception as e:
+            print(f"  {Y}[!] Invalid custom JSON: {e}{RST}")
+            payload = None
+
+        if payload is not None:
+            for base_url in (http_base, base):
+                try:
+                    full_url = (base_url + custom_url) if custom_url.startswith("/") else custom_url
+                    resp = curl_request(
+                        full_url, method="POST", data=payload,
+                        content_type="application/json",
+                        timeout=10, follow=True,
+                    )
+                    if resp["status"] in (200, 201, 202, 302):
+                        set_cookie = resp["headers"].get("set-cookie", "")
+                        body = resp["body"]
+                        token_headers = {}
+                        if body.strip().startswith("{"):
+                            try:
+                                data = json.loads(body)
+                                for key in ("token", "access_token", "accessToken", "jwt", "id_token"):
+                                    if key in data:
+                                        token_headers["Authorization"] = f"Bearer {data[key]}"
+                                        break
+                            except Exception:
+                                pass
+                        if set_cookie or token_headers:
+                            return {
+                                "success": True,
+                                "base_url": base_url,
+                                "login_url": full_url,
+                                "cookies": set_cookie,
+                                "token_headers": token_headers,
+                                "email": email,
+                            }
+                except Exception:
+                    continue
 
     # Try to fetch CSRF token
     csrf = None
@@ -166,12 +248,13 @@ def try_login(domain, email, password):
         except Exception:
             continue
 
-    # Try HTTPS first, then HTTP
-    for base_url in (base, http_base):
+    # Try HTTP first (local targets often HTTP-only), then HTTPS
+    for base_url in (http_base, base):
         for login_path in LOGIN_PATHS:
-            for email_field in EMAIL_FIELDS:
-                for pass_field in PASS_FIELDS:
-                    for is_json in (True, False):
+            # Try JSON-only first (modern APIs), then form-urlencoded
+            for is_json in (True, False):
+                for email_field in EMAIL_FIELDS:
+                    for pass_field in PASS_FIELDS:
                         payload = {email_field: email, pass_field: password}
                         if csrf and not is_json:
                             payload["_csrf"] = csrf
@@ -186,7 +269,7 @@ def try_login(domain, email, password):
                                 method="POST",
                                 data=payload,
                                 content_type=ct,
-                                timeout=12,
+                                timeout=4,
                                 follow=True,
                             )
                         except Exception:
@@ -300,6 +383,49 @@ def manual_cookie_fallback(label):
         return cookie if cookie else None
     except (EOFError, KeyboardInterrupt):
         return None
+
+# ============================================================================
+# AUDIT LOGGING
+# ============================================================================
+def audit_log(idir, method, url, who, status, size, note=""):
+    """Log every IDOR request for legal audit trail."""
+    try:
+        log_file = idir / f"audit_{datetime.date.today().isoformat()}.log"
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        line = f"[{ts}] {method:6} {url} | who={who} | status={status} | size={size}b"
+        if note:
+            line += f" | {note}"
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+# ============================================================================
+# SCOPE PER-REQUEST
+# ============================================================================
+def is_url_in_scope(url, scope):
+    """Check URL hostname against scope rules."""
+    if not scope:
+        return True
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+    except Exception:
+        return True
+    def matches(patterns):
+        for pat in patterns:
+            if pat.startswith("*."):
+                if host == pat[2:] or host.endswith("." + pat[2:]):
+                    return True
+            elif host == pat:
+                return True
+        return False
+    if scope.get("exclude") and matches(scope["exclude"]):
+        return False
+    if not scope.get("include"):
+        return True
+    return matches(scope["include"])
+
 # ============================================================================
 # DISCOVERY — Extract IDOR candidates
 # ============================================================================
@@ -308,8 +434,19 @@ IDOR_PATTERNS = [
     r'/v\d+/',
     r'/graphql',
     r'/[a-z][a-z_-]+/\d{2,}',
+    r'/[a-z][a-z_-]+/[a-z][a-z_-]+/\d+',
     r'/[a-z][a-z_-]+/[0-9a-f]{8}-[0-9a-f]{4}-',
-    r'\?(?:id|user_id|userId|order_id|orderId|invoice_id|account_id|address_id)=',
+    r'/identity/',
+    r'/workshop/',
+    r'/community/',
+    r'/vehicle/',
+    r'/orders?/',
+    r'/users?/',
+    r'/accounts?/',
+    r'/profiles?/',
+    r'/posts?/',
+    r'/comments?/',
+    r'\?(?:id|user_id|userId|order_id|orderId|invoice_id|account_id|address_id|post_id|postId|comment_id|commentId|vehicle_id|vehicleId)=',
 ]
 
 PRIVATE_URL_HINTS = re.compile(
@@ -653,7 +790,7 @@ def generate_playbook(idir_dir, candidates, unauth_findings=None, auth_findings=
 # PHASE: UNAUTHENTICATED SCAN
 # ============================================================================
 def phase_unauthenticated_scan(domain, workspace, candidates, PhaseProgress,
-                                log_info, log_ok, log_warn):
+                                log_info, log_ok, log_warn, scope=None):
     """Test candidates without auth."""
     idir = Path(workspace) / domain / "idor"
     idir.mkdir(parents=True, exist_ok=True)
@@ -661,16 +798,34 @@ def phase_unauthenticated_scan(domain, workspace, candidates, PhaseProgress,
     prog = PhaseProgress("IDOR — Unauthenticated Scan", 2)
     confirmed, suspicious = [], []
     protected_count, public_count = 0, 0
+    rate_limited_count = 0
 
     max_check = min(len(candidates), 150)
-    rate = 3.0
+    rate = GLOBAL_RATE_LIMIT
 
     log_info(f"Testing {max_check} candidates without authentication...")
 
     for url in candidates[:max_check]:
+        if not is_url_in_scope(url, scope):
+            log_warn(f"Out of scope — skipping: {url[:80]}")
+            continue
+
         try:
             resp = curl_request(url, timeout=8)
         except Exception:
+            continue
+
+        audit_log(idir, "GET", url, "anon", resp.get("status", 0),
+                  len(resp.get("body", "")), "unauth")
+
+        if resp.get("status") == 429:
+            rate_limited_count += 1
+            backoff = min(60, 2 ** rate_limited_count)
+            log_warn(f"Rate limited (429) — backing off {backoff}s ({rate_limited_count}/3)")
+            time.sleep(backoff)
+            if rate_limited_count >= 3:
+                log_warn("Rate limit hit 3 times — aborting unauth scan")
+                break
             continue
 
         verdict, reason, confidence = classify_unauth_response(url, resp)
@@ -741,17 +896,43 @@ def phase_unauthenticated_scan(domain, workspace, candidates, PhaseProgress,
 # PHASE: AUTHENTICATED TESTING
 # ============================================================================
 def phase_authenticated_testing(domain, workspace, candidates, session_a,
-                                  session_b, PhaseProgress, log_info, log_ok, log_warn):
-    """A vs B vs anon testing."""
+                                  session_b, PhaseProgress, log_info, log_ok, log_warn,
+                                  scope=None):
+    """A vs B vs anon testing with session refresh + audit + rate limit."""
     idir = Path(workspace) / domain / "idor"
     prog = PhaseProgress("IDOR — Authenticated Testing", 1)
 
     confirmed, suspicious = [], []
     tested = 0
     max_candidates = 100
-    rate = 2.0
+    rate = max(0.5, GLOBAL_RATE_LIMIT / 2)
+    rate_limited_count = 0
+
+    def refresh_session(session, label):
+        creds = session.get("creds")
+        if not creds:
+            return None
+        log_warn(f"Refreshing session for {label}...")
+        new_login = try_login(domain, creds["email"], creds["password"],
+                              GLOBAL_LOGIN_URL, GLOBAL_LOGIN_JSON)
+        if not new_login.get("success"):
+            return None
+        v = validate_session(domain, new_login)
+        if not v.get("valid"):
+            return None
+        return {
+            "cookies": new_login.get("cookies", ""),
+            "token_headers": new_login.get("token_headers", {}),
+            "user_id": v.get("user_id"),
+            "email": session.get("email"),
+            "creds": creds,
+        }
 
     for url in candidates[:max_candidates]:
+        if not is_url_in_scope(url, scope):
+            log_warn(f"Out of scope — skipping: {url[:80]}")
+            continue
+
         try:
             resp_a = curl_request(
                 url,
@@ -771,6 +952,43 @@ def phase_authenticated_testing(domain, workspace, candidates, session_a,
 
             resp_anon = curl_request(url, timeout=10)
             time.sleep(1.0 / rate)
+
+            audit_log(idir, "GET", url, "A", resp_a.get("status", 0),
+                      len(resp_a.get("body", "")), "auth")
+            audit_log(idir, "GET", url, "B", resp_b.get("status", 0),
+                      len(resp_b.get("body", "")), "auth")
+            audit_log(idir, "GET", url, "anon", resp_anon.get("status", 0),
+                      len(resp_anon.get("body", "")), "auth")
+
+            if 429 in (resp_a.get("status"), resp_b.get("status"), resp_anon.get("status")):
+                rate_limited_count += 1
+                backoff = min(60, 2 ** rate_limited_count)
+                log_warn(f"Rate limited (429) — backing off {backoff}s ({rate_limited_count}/3)")
+                time.sleep(backoff)
+                if rate_limited_count >= 3:
+                    log_warn("Rate limit hit 3 times — aborting auth scan")
+                    break
+                continue
+
+            if resp_a.get("status") == 401:
+                log_warn("Session A expired (401) — refreshing...")
+                new_sess = refresh_session(session_a, "A")
+                if new_sess:
+                    session_a = new_sess
+                    log_ok("Session A refreshed")
+                else:
+                    log_warn("Session A refresh failed — aborting")
+                    break
+
+            if resp_b.get("status") == 401:
+                log_warn("Session B expired (401) — refreshing...")
+                new_sess = refresh_session(session_b, "B")
+                if new_sess:
+                    session_b = new_sess
+                    log_ok("Session B refreshed")
+                else:
+                    log_warn("Session B refresh failed — aborting")
+                    break
 
             tested += 1
             result = analyze_idor_pair(url, resp_a, resp_b, resp_anon)
@@ -808,10 +1026,13 @@ def phase_authenticated_testing(domain, workspace, candidates, session_a,
 # ============================================================================
 # MAIN PHASE FUNCTION
 # ============================================================================
-def phase_idor(domain, workspace, PhaseProgress, log_info, log_ok, log_warn):
+def phase_idor(domain, workspace, PhaseProgress, log_info, log_ok, log_warn, scope=None):
     """Full IDOR phase."""
     idir = Path(workspace) / domain / "idor"
     idir.mkdir(parents=True, exist_ok=True)
+
+    if scope is None:
+        scope = GLOBAL_SCOPE
 
     # ===== STEP 1: DISCOVERY =====
     prog = PhaseProgress("16 — IDOR Discovery", 5)
@@ -892,7 +1113,7 @@ def phase_idor(domain, workspace, PhaseProgress, log_info, log_ok, log_warn):
     log_info("Starting unauthenticated scan (no login required)...")
     unauth_results = phase_unauthenticated_scan(
         domain, workspace, candidates_list, PhaseProgress,
-        log_info, log_ok, log_warn
+        log_info, log_ok, log_warn, scope=scope
     )
 
     if unauth_results["confirmed"]:
@@ -948,7 +1169,8 @@ def phase_idor(domain, workspace, PhaseProgress, log_info, log_ok, log_warn):
     prog = PhaseProgress("17 — IDOR Login", 2)
 
     log_info("Auto-login for A...")
-    result_a = try_login(domain, creds_a["email"], creds_a["password"])
+    result_a = try_login(domain, creds_a["email"], creds_a["password"],
+                         GLOBAL_LOGIN_URL, GLOBAL_LOGIN_JSON)
     session_a = None
     if result_a.get("success"):
         v = validate_session(domain, result_a)
@@ -958,6 +1180,7 @@ def phase_idor(domain, workspace, PhaseProgress, log_info, log_ok, log_warn):
                 "token_headers": result_a.get("token_headers", {}),
                 "user_id": v.get("user_id"),
                 "email": creds_a["email"],
+                "creds": creds_a,
             }
             prog.step(f"Login A → user_id={v.get('user_id', '?')}")
         else:
@@ -978,7 +1201,8 @@ def phase_idor(domain, workspace, PhaseProgress, log_info, log_ok, log_warn):
                     "playbook": str(playbook), "auth_tested": False}
 
     log_info("Auto-login for B...")
-    result_b = try_login(domain, creds_b["email"], creds_b["password"])
+    result_b = try_login(domain, creds_b["email"], creds_b["password"],
+                         GLOBAL_LOGIN_URL, GLOBAL_LOGIN_JSON)
     session_b = None
     if result_b.get("success"):
         v = validate_session(domain, result_b)
@@ -988,6 +1212,7 @@ def phase_idor(domain, workspace, PhaseProgress, log_info, log_ok, log_warn):
                 "token_headers": result_b.get("token_headers", {}),
                 "user_id": v.get("user_id"),
                 "email": creds_b["email"],
+                "creds": creds_b,
             }
             prog.step(f"Login B → user_id={v.get('user_id', '?')}")
         else:
@@ -1013,7 +1238,7 @@ def phase_idor(domain, workspace, PhaseProgress, log_info, log_ok, log_warn):
     # ===== STEP 6: AUTH TESTING =====
     auth_results = phase_authenticated_testing(
         domain, workspace, candidates_list, session_a, session_b,
-        PhaseProgress, log_info, log_ok, log_warn
+        PhaseProgress, log_info, log_ok, log_warn, scope=scope
     )
 
     all_confirmed = unauth_results["confirmed"] + auth_results["confirmed"]
