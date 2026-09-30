@@ -1,0 +1,15 @@
+# API Keys & Secrets
+clicker_api.env
+
+# Output & Results
+clicker_output/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS
+.DS_Store
+Thumbs.db
