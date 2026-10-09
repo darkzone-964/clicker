@@ -1,4 +1,4 @@
-```markdown
+markdown
 # 🔍 Clicker — Black-box Recon & Bug Bounty Pipeline
 
 ![Version](https://img.shields.io/badge/version-2.3-blue)
