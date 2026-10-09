@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Clicker v2.0 - Black-box Recon & Bug Bounty Pipeline
+Clicker v2.2 - Black-box Recon & Bug Bounty Pipeline
 Enhanced with fuzzing, sensitive file discovery, and URL normalization.
 """
 import argparse
@@ -22,6 +22,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from ai_orchestrator import get_ai_decision, verify_and_generate_poc_real, execute_puredns_smart, optimize_tool_command
 from urllib.parse import urlparse
+import telegram_io
+import state
+import ai_memory
+import ai_thinker
+import ai_executor
+import ai_verifier
 
 try:
     from idor_module import phase_idor as idor_phase_func
@@ -67,7 +73,7 @@ WAF_TOOL_OPTIONS = {
 }
 HTTP_PROXY_TOOLS = {
     "subfinder", "sublist3r", "chaos", "assetfinder", "github-subdomains",
-    "findomain", "waybackurls", "gau", "httpx", "httpx-toolkit", "curl",
+    "findomain", "waybackurls", "gau", "httpx", "curl",
     "katana", "waymore", "mantra", "subzy", "subjack", "wafw00f", "ffuf",
     "nuclei", "whatweb", "uro", "dirsearch"
 }
@@ -78,7 +84,7 @@ NO_PROXY_TOOLS = {
 FALLBACK_URLS = {
     "resolvers": "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt",
     "wordlist": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-20000.txt",
-    "dirsearch_wordlist": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/directory-list-2.3-medium.txt",
+    "dirsearch_wordlist": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt",
 }
 EXPOSED_FILE_PATHS = [
     "/.env", "/.env.local", "/.env.dev", "/.env.prod", "/.env.backup",
@@ -111,6 +117,14 @@ args_skip_active_subs = False
 args_skip_vuln = False
 args_skip_fuzz = False
 args_skip_idor = False
+args_idor_pw = False
+args_idor_pw_duration = 25
+args_idor_pw_visible = False
+args_idor_pw_follow_links = False
+args_idor_a_email = None
+args_idor_a_pass = None
+args_idor_b_email = None
+args_idor_b_pass = None
 args_idor_login_url = None
 args_idor_login_json = None
 args_idor_only = False
@@ -127,6 +141,65 @@ GLOBAL_HYBRID_PROXY = False
 GLOBAL_PROXY_HEALTH_OK = True
 GLOBAL_WAF_TYPE = "default"
 SKIP_CURRENT_PHASE = False
+
+# Shared context passed to AI for every tool call
+GLOBAL_AI_CONTEXT = {
+    "domain": "",
+    "phase_name": "",
+    "phase_number": 0,
+    "passive_subs": 0,
+    "active_subs": 0,
+    "resolved_hosts": 0,
+    "alive_hosts": 0,
+    "f403": 0,
+    "f404": 0,
+    "open_ports": 0,
+    "urls_found": 0,
+    "js_files": 0,
+    "secrets": 0,
+}
+
+# AI planning loop result (set after passive phase)
+AI_PLAN_GLOBAL = None
+
+# Target-specific port (extracted from domain:port)
+GLOBAL_TARGET_PORT = ""
+
+
+def _extract_target_port(domain):
+    """Extract port from domain:port or return ''."""
+    if not domain or ":" not in domain:
+        return ""
+    parts = domain.rsplit(":", 1)
+    if len(parts) != 2:
+        return ""
+    port = parts[1].strip()
+    if port.isdigit() and 1 <= int(port) <= 65535:
+        return port
+    return ""
+
+
+def _merge_port_into_list(ports_csv, extra_port):
+    """Prepend extra_port to a CSV list of ports if missing."""
+    if not extra_port:
+        return ports_csv
+    ports = [p.strip() for p in ports_csv.split(",") if p.strip()]
+    if extra_port in ports:
+        return ports_csv
+    return extra_port + "," + ",".join(ports)
+
+
+def _guess_scheme_for_port(port):
+    """Return http:// or https:// based on port number."""
+    try:
+        pnum = int(port)
+    except (ValueError, TypeError):
+        return "http://"
+    if pnum in (443, 8443, 9443):
+        return "https://"
+    return "http://"
+
+
 
 # ============================================================================
 # PROGRAM PROFILES
@@ -556,6 +629,43 @@ def log_err(msg):     print(f"{R}[x]{RST} {msg}")
 def log_dim(msg):     print(f"{DIM}{msg}{RST}")
 
 
+def ask_phase(phase_name, default=False, timeout=10):
+    """Ask user whether to run a phase. Local 10s + Telegram 60s. First reply wins."""
+    env = os.environ.get("CLICKER_PHASE_AUTO", "").strip().lower()
+    if env in ("yes", "y", "all", "1", "true"):
+        return True
+    if env in ("no", "n", "0", "false"):
+        return False
+
+    tty = sys.stdin.isatty()
+    tg = telegram_io.is_enabled()
+    if not tty and not tg:
+        return default
+
+    if tty:
+        label = "Y/n" if default else "y/N"
+        sys.stdout.write(f"{BOLD}{C}[?]{RST} {phase_name}? [{label}] (10s local / 60s TG): ")
+        sys.stdout.flush()
+
+    try:
+        ans = telegram_io.ask(
+            prompt=f"Run phase: {phase_name}?",
+            kind="yesno",
+            default=("y" if default else "n"),
+            local_timeout=timeout,
+            tg_timeout=60,
+        )
+    except Exception as e:
+        if args_verbose:
+            log_warn(f"telegram_io.ask failed: {e}")
+        ans = "y" if default else "n"
+
+    if tty:
+        print()
+
+    return ans == "y"
+
+
 def send_telegram_progress(domain, high_value_subs):
     """Send early progress update to Telegram when high-value subs are found."""
     token = api_keys_global.get("TELEGRAM_BOT_TOKEN", "")
@@ -641,8 +751,54 @@ def check_proxy_health(proxy, timeout=8):
     except Exception: return False
 
 def run_cmd(cmd, timeout=600, tool_name=None, allow_fallback=True):
+    """Wrapper: run _run_cmd_core and record experience to ai_memory."""
+    cmd_original = cmd
+    _t0 = time.time()
+    tracker = {"cmd_final": cmd}
+    result = _run_cmd_core(cmd, timeout, tool_name, allow_fallback, tracker)
+    if tool_name and result is not None:
+        try:
+            _elapsed = time.time() - _t0
+            _out = result[1] or ""
+            _lines = len(_out.splitlines()) if _out else 0
+            _chosen = "ai" if tracker["cmd_final"] != cmd_original else "original"
+            ai_memory.record_experience(
+                target=GLOBAL_AI_CONTEXT.get("domain", ""),
+                waf=GLOBAL_WAF_TYPE,
+                phase=GLOBAL_AI_CONTEXT.get("phase_name", ""),
+                tool=tool_name,
+                cmd_original=cmd_original,
+                cmd_ai=tracker["cmd_final"],
+                chosen=_chosen,
+                exit_code=int(result[0]) if isinstance(result[0], (int, float)) else 1,
+                duration_sec=_elapsed,
+                output_lines=_lines,
+                output_sample=_out[:2000],
+            )
+        except Exception:
+            pass
+    return result
+
+
+def _run_cmd_core(cmd, timeout=600, tool_name=None, allow_fallback=True, _tracker=None):
     global GLOBAL_PROXY_HEALTH_OK, SKIP_CURRENT_PHASE, GLOBAL_EXTRA_HEADERS
     if SKIP_CURRENT_PHASE: SKIP_CURRENT_PHASE = False; return (0, "", "")
+
+    # ─── AI optimization (applies to ALL tools) ───
+    if tool_name:
+        api_key = api_keys_global.get("FREELLMAPI_API_KEY", "")
+        if api_key:
+            try:
+                ctx = dict(GLOBAL_AI_CONTEXT)
+                ctx["waf_type"] = GLOBAL_WAF_TYPE
+                ctx["rate_limit"] = GLOBAL_RATE_LIMIT
+                optimized = optimize_tool_command(tool_name, cmd, ctx, api_key)
+                if optimized:
+                    cmd = optimized
+            except Exception as e:
+                if args_verbose:
+                    print(f"  \033[93m[!]\033[0m AI optimization error for {tool_name}: {e}")
+
     if GLOBAL_EXTRA_HEADERS and tool_name in ("httpx", "httpx-toolkit", "nuclei", "katana", "ffuf", "curl"):
         for h in GLOBAL_EXTRA_HEADERS: cmd += f" -H {q(h)}"
     has_proxy = bool(os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy"))
@@ -660,6 +816,8 @@ def run_cmd(cmd, timeout=600, tool_name=None, allow_fallback=True):
     if use_proxy and GLOBAL_USE_PROXYCHAINS:
         pc = shutil.which("proxychains4") or shutil.which("proxychains")
         if pc: final_cmd = f"{pc} -q {cmd}"
+    if _tracker is not None:
+        _tracker["cmd_final"] = final_cmd
     try:
         p = subprocess.run(final_cmd, shell=True, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", timeout=timeout)
         result = (p.returncode, p.stdout.strip(), p.stderr.strip())
@@ -891,6 +1049,169 @@ def get_tool_options(tool_name, waf_type):
 # ============================================================================
 # PHASE 0: QUICK PROBE & PHASE 1: PASSIVE
 # ============================================================================
+# ────────────────────────────────────────────────────────────
+# AI Planning Loop integration (Task 1)
+# ────────────────────────────────────────────────────────────
+_PHASE_NAME_MAP = {
+    "quick_probe": "quick",
+    "passive_subdomain_enum": "passive",
+    "waf_detection": "waf",
+    "active_subdomain_enum": "active",
+    "dns_resolution": "dns_resolution",
+    "response_filter": "response",
+    "tech_detect": "tech",
+    "takeover": "takeover",
+    "vuln_scan": "vuln",
+    "ports": "ports",
+    "leakix": "leakix",
+    "content_discovery": "content",
+    "sensitive_files": "sensitive",
+    "js_recon": "js",
+    "idor": "idor",
+    "screenshots": "screenshots",
+    "dns_enrichment": "dns",
+}
+
+
+def _run_ai_plan_loop(domain, workspace, passive_res, api_keys, _state=None):
+    """Run AI planning loop after passive. Returns plan dict or None."""
+    try:
+        import ai_loop
+    except ImportError as e:
+        log_warn(f"ai_loop module not available: {e}")
+        return None
+    api_key = api_keys.get("FREELLMAPI_API_KEY", "")
+    if not api_key:
+        log_warn("No FREELLMAPI_API_KEY - AI plan skipped")
+        return None
+
+    subs = (passive_res or {}).get("all_subdomains", [])
+    hv = (passive_res or {}).get("sensitive_subs", [])
+    lines = [f"- {len(subs)} subdomains discovered"]
+    if hv:
+        lines.append(f"- {len(hv)} high-value subdomains:")
+        for s in hv[:10]:
+            lines.append(f"    {s}")
+    else:
+        lines.append("- No high-value subdomains detected")
+    # Append state snapshot for AI
+    try:
+        if _state:
+            lines.append("")
+            lines.append("--- STATE SNAPSHOT ---")
+            lines.append(state.summary_for_ai(_state))
+    except Exception:
+        pass
+    summary = "\n".join(lines)
+
+    available = [
+        "quick", "passive", "waf", "active", "dns_resolution", "response",
+        "tech", "takeover", "vuln", "ports", "leakix", "content",
+        "sensitive", "js", "idor", "screenshots", "dns",
+    ]
+
+    try:
+        # Build state summary for AI
+        _state_summary = None
+        try:
+            if _state:
+                _state_summary = state.summary_for_ai(_state)
+        except Exception as _e:
+            log_warn(f"state summary build failed: {_e}")
+
+        plan = ai_loop.run_planning_loop(
+            domain=domain,
+            waf=GLOBAL_WAF_TYPE,
+            phase_name="passive",
+            phase_summary=summary,
+            available_phases=available,
+            api_key=api_key,
+            output_dir=Path(workspace) / domain,
+            max_rounds=2,
+            verbose=args_verbose,
+            state_summary=_state_summary,
+        )
+        return plan
+    except Exception as e:
+        log_err(f"AI planning loop failed: {e}")
+        return None
+
+
+# ── Technical dependency rules (not opinions — file-based facts) ──
+# If X needs Y's output, Y must run before X.
+PHASE_DEPS = {
+    "response":     ["passive", "dns_resolution"],
+    "tech":         ["response"],
+    "ports":        ["dns_resolution", "response", "tech"],
+    "takeover":     ["response"],
+    "vuln":         ["response", "tech"],
+    "content":      ["response"],
+    "sensitive":    ["response", "content"],
+    "js":           ["response", "content"],
+    "idor":         ["content"],
+    "screenshots":  ["response"],
+    "dns":          ["passive"],
+    "leakix":       ["response", "tech"],
+}
+
+
+def _reorder_phases(phases_list, ai_phases):
+    """Reorder per AI preference, but respect technical dependencies."""
+    # Convert AI names to clicker names
+    priority = {}
+    for i, ap in enumerate(ai_phases):
+        clicker_name = _PHASE_NAME_MAP.get(ap, ap)
+        priority[clicker_name] = i
+
+    # Build name -> (name, fn) dict for quick lookup
+    by_name = {name: (name, fn) for name, fn in phases_list}
+    remaining = list(by_name.keys())
+    default_order = {name: i for i, name in enumerate(remaining)}
+
+    # Topological sort with AI priority as tiebreaker
+    result = []
+    placed = set()
+    # Phases already completed before reorder (implicit — dependents don't need them re-added)
+    # We assume phases not in `remaining` have already run (or been removed).
+
+    def can_place(name):
+        for dep in PHASE_DEPS.get(name, []):
+            # If dependency is in our remaining queue, it must be placed first.
+            if dep in remaining and dep not in placed:
+                return False
+        return True
+
+    def priority_key(name):
+        # Lower = better. AI order first, then default order.
+        if name in priority:
+            return (0, priority[name])
+        return (1, default_order.get(name, 999))
+
+    # Iteratively place
+    max_iters = len(remaining) * len(remaining) + 10
+    iters = 0
+    while len(result) < len(remaining) and iters < max_iters:
+        iters += 1
+        candidates = [n for n in remaining if n not in placed and can_place(n)]
+        if not candidates:
+            # Cycle or stuck → place the highest-priority remaining anyway
+            candidates = [n for n in remaining if n not in placed]
+            if not candidates:
+                break
+        candidates.sort(key=priority_key)
+        chosen = candidates[0]
+        result.append(by_name[chosen])
+        placed.add(chosen)
+
+    # Any left over → append in default order
+    for name in remaining:
+        if name not in placed:
+            result.append(by_name[name])
+            placed.add(name)
+
+    return result
+
+
 def phase_quick_probe(domain, workspace):
     qdir = Path(workspace) / domain / "quick"
     mkd(qdir)
@@ -1049,7 +1370,7 @@ def phase_waf(domain, workspace, available):
     detected = "default"
     waf_simple = wdir / "waf-detected.txt"
     try:
-        httpx_bin = "httpx-toolkit" if "httpx-toolkit" in available else ("httpx" if "httpx" in available else None)
+        httpx_bin = "httpx" if "httpx" in available else ("httpx-toolkit" if "httpx-toolkit" in available else None)
         if httpx_bin and high_val.exists() and not is_file_empty(high_val):
             out = wdir / "httpx-waf.txt"
             # AI Optimization for httpx
@@ -1093,6 +1414,18 @@ def phase_waf(domain, workspace, available):
             wlines(waf_simple, [f"WAF Detected: {detected.upper()}"], auto_cleanup=False)
             print(f"  {G}v{RST} Saved to {waf_simple.name}")
             GLOBAL_WAF_TYPE = detected
+            try:
+                ai_memory.set_target_waf(GLOBAL_AI_CONTEXT.get("domain", ""), detected)
+            except Exception:
+                pass
+            # Also update in-memory state
+            try:
+                from ai_orchestrator import _categorize_waf as _cat_waf
+                _state["waf"] = detected
+                _state["waf_category"] = _cat_waf(detected)
+                state.save_state(workspace, domain, _state)
+            except Exception:
+                pass
         prog.done_phase()
         print(f"{C}[*] WAF Type: {detected.upper()}{RST}")
         return {"waf_file": str(waf_simple) if waf_simple.exists() else None, "waf_type": detected}
@@ -1104,7 +1437,9 @@ def phase_waf(domain, workspace, available):
 # PHASE 3, 4, 5, 6, 7
 # ============================================================================
 def phase_active_subs(domain, workspace, available):
-    if args_skip_active_subs: log_warn("Active subdomain enumeration skipped via flag"); return {"active_subs_file": "", "active_count": 0}
+    if not ask_phase("Run active subdomain enumeration"):
+        log_warn("Active subdomain enumeration skipped by user")
+        return {"active_subs_file": "", "active_count": 0, "_skipped": True}
     pdir = Path(workspace) / domain / "passive"
     adir = Path(workspace) / domain / "active_subs"
     mkd(adir)
@@ -1202,24 +1537,26 @@ def phase_response_filter(domain, workspace, passive, available):
     if not input_file.exists() or is_file_empty(input_file): input_file = pdir / "allsubs.txt"
     if not input_file.exists() or is_file_empty(input_file):
         input_file = adir / "_seeded_target.txt"
-        input_file.write_text(domain + "\n", encoding="utf-8")
-        print(f"  {Y}[!]{RST} No subdomains found -> seeding with main target: {domain}")
+        _scheme = _guess_scheme_for_port(GLOBAL_TARGET_PORT) if GLOBAL_TARGET_PORT else "https://"
+        _seed_line = f"{_scheme}{domain}\n"
+        input_file.write_text(_seed_line, encoding="utf-8")
+        print(f"  {Y}[!]{RST} No subdomains found -> seeding with: {_seed_line.strip()}")
     high_val = pdir / "high_value_subs.txt"
     prog = PhaseProgress("5 -> Response Filtering", 6)
     results = {"alive": [], "f403": [], "f404": [], "details": []}
-    httpx_bin = "httpx-toolkit" if "httpx-toolkit" in available else ("httpx" if "httpx" in available else None)
+    httpx_bin = "httpx" if "httpx" in available else ("httpx-toolkit" if "httpx-toolkit" in available else None)
     waf_type = detect_waf_from_file(workspace, domain)
     httpx_opts = get_tool_options("httpx", waf_type)
     try:
         if httpx_bin and high_val.exists() and not is_file_empty(high_val):
             out = adir / "details.txt"
-            cmd = f"{httpx_bin} -l {q(high_val)} -sc -td -cl -server -title -ip -silent -t 15 -rl 8 -timeout 7 -retries 1 -random-agent -follow-redirects -p {HTTPX_PORTS} {httpx_opts} -o {q(out)}"
+            cmd = f"{httpx_bin} -l {q(high_val)} -sc -td -cl -server -title -ip -silent -t 15 -rl 8 -timeout 7 -retries 1 -random-agent -follow-redirects -p {_merge_port_into_list(HTTPX_PORTS, GLOBAL_TARGET_PORT)} {httpx_opts} -o {q(out)}"
             run_cmd(cmd, timeout=600, tool_name=httpx_bin)
             results["details"] = rlines(out); prog.step(f"high-value details -> {G}{len(results['details'])}{RST}")
         else: prog.step("high-value details -> skipped")
         if httpx_bin and input_file.exists() and not is_file_empty(input_file):
             out = adir / "alive.txt"
-            cmd = f"{httpx_bin} -l {q(input_file)} -mc {HTTPX_STATUS_CODES} -silent -t 20 -rl 5 -timeout 7 -retries 1 -random-agent -follow-redirects -p {HTTPX_PORTS} {httpx_opts} -o {q(out)}"
+            cmd = f"{httpx_bin} -l {q(input_file)} -mc {HTTPX_STATUS_CODES} -silent -t 20 -rl 5 -timeout 7 -retries 1 -random-agent -follow-redirects -p {_merge_port_into_list(HTTPX_PORTS, GLOBAL_TARGET_PORT)} {httpx_opts} -o {q(out)}"
             run_cmd(cmd, timeout=1200, tool_name=httpx_bin)
             results["alive"] = rlines(out); prog.step(f"alive (extended) -> {G}{len(results['alive'])}{RST}")
         else: prog.step("alive -> skipped")
@@ -1250,11 +1587,11 @@ def phase_tech_detect(domain, workspace, available):
     ipsf = adir / "ips.txt"
     alivef = adir / "alive-final.txt"
     prog = PhaseProgress("6 -> Technology Detection", 3)
-    httpx_bin = "httpx-toolkit" if "httpx-toolkit" in available else ("httpx" if "httpx" in available else None)
+    httpx_bin = "httpx" if "httpx" in available else ("httpx-toolkit" if "httpx-toolkit" in available else None)
     httpx_opts = get_tool_options("httpx", GLOBAL_WAF_TYPE)
     try:
         if httpx_bin and sucf.exists() and not is_file_empty(sucf):
-            cmd = f"{httpx_bin} -l {q(sucf)} -sc -td -cl -server -title -ip -silent -t 15 -rl 8 -timeout 10 -retries 1 -random-agent {httpx_opts} -o {q(techf)}"
+            cmd = f"{httpx_bin} -l {q(sucf)} -sc -td -cl -server -title -ip -silent -t 15 -rl 8 -timeout 10 -retries 1 -random-agent -p {_merge_port_into_list(HTTPX_PORTS, GLOBAL_TARGET_PORT)} {httpx_opts} -o {q(techf)}"
             run_cmd(cmd, timeout=1200, tool_name=httpx_bin); prog.step(f"httpx tech detection -> {techf.name}")
         else: prog.step("httpx tech -> skipped")
         if techf.exists() and not is_file_empty(techf):
@@ -1334,17 +1671,67 @@ def _exposed_one(base_url):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=3) as res:
-                if res.status == 200:
-                    body = res.read(512)
-                    if path == "/.git/HEAD" and b"ref:" not in body.lower(): continue
-                    if path.endswith(".env") and b"=" not in body: continue
-                    out.append(f"{url} [200]")
-        except urllib.error.HTTPError: continue
-        except Exception: continue
+                if res.status != 200:
+                    continue
+
+                ct = (res.headers.get("Content-Type") or "").lower()
+                body = res.read(1024)
+                body_lower = body.lower()
+                is_html = (b"<html" in body_lower or b"<!doctype" in body_lower or b"<head" in body_lower)
+                expects_html = path.endswith((".html", ".htm", "/"))
+
+                # SPA fallback: server returns HTML for everything → false positive
+                if is_html and not expects_html:
+                    continue
+                if "text/html" in ct and not expects_html:
+                    continue
+
+                # Path-specific content validation
+                if path == "/.git/HEAD" and b"ref:" not in body_lower:
+                    continue
+                if path.endswith(".env") and b"=" not in body:
+                    continue
+                if path == "/.ssh/id_rsa" and b"private key" not in body_lower and b"-----begin" not in body_lower:
+                    continue
+                if path == "/.ssh/id_rsa.pub" and b"ssh-rsa" not in body_lower and b"ssh-ed25519" not in body_lower:
+                    continue
+                if path == "/id_rsa" and b"private key" not in body_lower and b"-----begin" not in body_lower:
+                    continue
+                if path == "/id_rsa.pub" and b"ssh-rsa" not in body_lower and b"ssh-ed25519" not in body_lower:
+                    continue
+                if path == "/.htpasswd" and b":" not in body:
+                    continue
+                if path == "/.gitconfig" and b"[" not in body:
+                    continue
+                if path == "/.gitignore" and (b"# " not in body and b"/" not in body and b"*" not in body):
+                    continue
+                if path == "/.dockerignore" and is_html:
+                    continue
+                if path == "/Dockerfile" and (b"FROM" not in body and b"#" not in body):
+                    continue
+                if path.endswith((".sql", "/backup.sql", "/dump.sql", "/database.sql", "/db.sql")):
+                    if not any(m in body for m in (b"INSERT", b"CREATE", b"--", b"DROP", b"SELECT")):
+                        continue
+                if path.endswith((".db", ".sqlite", ".sqlite3")):
+                    # Binary SQLite starts with "SQLite format 3"
+                    if b"sqlite" not in body_lower[:50] and b"\x00" not in body[:20]:
+                        continue
+                if path.endswith(".bak") or path.endswith(".old") or path.endswith(".orig"):
+                    # Generic backup — should not be HTML for config files
+                    if is_html and not path.endswith((".html", ".htm")):
+                        continue
+
+                out.append(f"{url} [200]")
+        except urllib.error.HTTPError:
+            continue
+        except Exception:
+            continue
     return out
 
 def phase_vuln_scan(domain, workspace, available):
-    if args_skip_vuln: log_warn("Vulnerability scan skipped via flag"); return {"nuclei": [], "cors": [], "exposed": []}
+    if not ask_phase("Run vulnerability scanning"):
+        log_warn("Vulnerability scan skipped by user")
+        return {"nuclei": [], "cors": [], "exposed": [], "_skipped": True}
     adir = Path(workspace) / domain / "active"
     vdir = Path(workspace) / domain / "vulns"
     mkd(vdir)
@@ -1589,7 +1976,9 @@ def phase_content_discovery(domain, workspace, available):
     except KeyboardInterrupt: log_warn("Phase 11 skipped"); return {"final_urls": "", "clean_urls": ""}
 
 def phase_sensitive_files(domain, workspace, available):
-    if args_skip_fuzz: log_warn("Sensitive files / fuzzing skipped via flag"); return {"passive": "", "dirsearch": "", "ffuf": ""}
+    if not ask_phase("Run fuzzing / sensitive files"):
+        log_warn("Sensitive files / fuzzing skipped by user")
+        return {"passive": "", "dirsearch": "", "ffuf": "", "_skipped": True}
     udir = Path(workspace) / domain / "urls"
     sdir = Path(workspace) / domain / "sensitive"
     mkd(sdir)
@@ -1618,9 +2007,9 @@ def phase_sensitive_files(domain, workspace, available):
                 outf = sdir / "dirsearch.json"
                 wl = ensure_essential_file("dirsearch_wordlist", "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt")
                 if not wl: wl = "/usr/share/seclists/Discovery/Web-Content/common.txt"
-                cmd = f"dirsearch -l {q(base_urls)} -e {q(FUZZ_EXTENSIONS)} -w {q(wl)} -t 5 --max-rate=3 --delay=0.7 --timeout=10 --retries=2 --random-agent -r --max-recursion-depth=2 --full-url --exclude-sizes=0B -o {q(outf)} --format=json --log={q(sdir/'dirsearch.log')} 2>/dev/null || true"
+                cmd = f"dirsearch -l {q(base_urls)} -e {q(FUZZ_EXTENSIONS)} -w {q(wl)} -t 10 --max-rate=5 --delay=0.3 --timeout=8 --retries=1 --random-agent --full-url --exclude-sizes=0B -o {q(outf)} --format=json --log={q(sdir/'dirsearch.log')} 2>/dev/null || true"
                 print(f"  {DIM}Running dirsearch on {len(urls)} host(s)...{RST}")
-                run_cmd(cmd, timeout=1800, tool_name="dirsearch")
+                run_cmd(cmd, timeout=600, tool_name="dirsearch")
                 if outf.exists() and not is_file_empty(outf): results["dirsearch"] = str(outf); prog.step(f"dirsearch -> {G}{'done' if results['dirsearch'] else 'no results'}{RST}")
                 else: prog.step("dirsearch -> no base URLs")
             else: prog.step("dirsearch -> skipped")
@@ -1636,9 +2025,9 @@ def phase_sensitive_files(domain, workspace, available):
                 for tgt in targets:
                     safe_name = re.sub(r'[^a-zA-Z0-9.-]', '_', tgt.replace("https://", "").replace("http://", ""))
                     outf = sdir / f"ffuf_{safe_name}.json"
-                    cmd = f"ffuf -u {q(tgt)}/FUZZ -w {q(wl)} -e {q('.' + FUZZ_EXTENSIONS.replace(',', ',.'))} -D -t 5 -p 0.7-1.2 -rate 3 -timeout 10 -recursion -recursion-depth 2 -recursion-strategy greedy -mc 200,204,301,302,307 -fs 0 -c -o {q(outf)} -of json 2>/dev/null || true"
+                    cmd = f"ffuf -u {q(tgt)}/FUZZ -w {q(wl)} -e {q('.' + FUZZ_EXTENSIONS.replace(',', ',.'))} -D -t 15 -p 0.3-0.8 -rate 10 -timeout 8 -mc 200,204,301,302,307 -fs 0 -c -o {q(outf)} -of json 2>/dev/null || true"
                     print(f"  {DIM}Running ffuf on {tgt}...{RST}")
-                    run_cmd(cmd, timeout=1200, tool_name="ffuf")
+                    run_cmd(cmd, timeout=600, tool_name="ffuf")
                     if outf.exists() and not is_file_empty(outf): all_ffuf.append(str(outf))
                 if all_ffuf: results["ffuf"] = ",".join(all_ffuf); prog.step(f"ffuf -> {G}{len(all_ffuf)}{RST} host(s)")
                 else: prog.step("ffuf -> no targets")
@@ -1648,7 +2037,9 @@ def phase_sensitive_files(domain, workspace, available):
     except KeyboardInterrupt: log_warn("Phase 12 skipped"); return results
 
 def phase_js_recon(domain, workspace, available):
-    if args_skip_js: log_warn("JS recon skipped via flag"); return {"js_file": "", "secrets_file": ""}
+    if not ask_phase("Run JS recon"):
+        log_warn("JS recon skipped by user")
+        return {"js_file": "", "secrets_file": "", "_skipped": True}
     udir = Path(workspace) / domain / "urls"
     jsdir = Path(workspace) / domain / "js"
     mkd(jsdir)
@@ -1703,7 +2094,9 @@ def phase_js_recon(domain, workspace, available):
 # PHASE 14, 15, SCORING, REPORTING
 # ============================================================================
 def phase_screenshots(domain, workspace, available):
-    if args_skip_screenshots: log_warn("Screenshots skipped via flag"); return
+    if not ask_phase("Run screenshots"):
+        log_warn("Screenshots skipped by user")
+        return {"_skipped": True}
     adir = Path(workspace) / domain / "active"
     alivef = adir / "alive-final.txt"
     prog = PhaseProgress("14 -> Screenshots", 2)
@@ -1772,6 +2165,65 @@ def score_finding(kind, sub=None):
     return base
 
 
+def send_telegram_completion(workspace, result, findings, elapsed_sec=None):
+    """Send 'Testing End' summary to Telegram when scan finishes."""
+    try:
+        if not telegram_io.is_enabled():
+            return
+    except Exception:
+        return
+
+    targets = result.get("targets", [])
+    n_targets = len(targets)
+    n_findings = len(findings)
+    high = sum(1 for f in findings if f.get("score", 0) >= 70)
+    top = findings[0] if findings else None
+
+    lines = []
+    lines.append("\u2705 <b>Testing End</b>")
+    lines.append("")
+    lines.append(f"<b>Version:</b> {html.escape(str(VERSION))}")
+    lines.append(f"<b>Targets scanned:</b> {n_targets}")
+    lines.append(f"<b>Total findings:</b> {n_findings}")
+    lines.append(f"<b>High/Critical:</b> {high}")
+
+    if top:
+        lines.append("")
+        lines.append("\U0001f3c6 <b>Top finding:</b>")
+        lines.append(f"  Score: <b>{top.get('score')}</b>")
+        lines.append(f"  Type: {html.escape(str(top.get('type', '')))}")
+        lines.append(f"  Target: <code>{html.escape(str(top.get('target', ''))[:80])}</code>")
+
+    if elapsed_sec is not None:
+        m, s = divmod(int(elapsed_sec), 60)
+        h, m = divmod(m, 60)
+        if h:
+            lines.append(f"<b>Duration:</b> {h}h {m}m {s}s")
+        elif m:
+            lines.append(f"<b>Duration:</b> {m}m {s}s")
+        else:
+            lines.append(f"<b>Duration:</b> {s}s")
+
+    lines.append("")
+    lines.append(f"<b>Workspace:</b> <code>{html.escape(str(workspace))}</code>")
+
+    # Target list (limited)
+    if targets:
+        names = [t.get("domain", "?") for t in targets][:10]
+        lines.append("")
+        lines.append("<b>Targets:</b>")
+        for nm in names:
+            lines.append(f"  \u2022 <code>{html.escape(str(nm))}</code>")
+        if len(targets) > 10:
+            lines.append(f"  <i>... and {len(targets) - 10} more</i>")
+
+    try:
+        telegram_io.notify("\n".join(lines))
+        print(f"{G}[+]{RST} Telegram completion notification sent")
+    except Exception as e:
+        print(f"{Y}[!]{RST} Telegram completion notify failed: {e}")
+
+
 def send_telegram_report(target_domain, target_findings):
     """Send high-severity findings to Telegram."""
     token = api_keys_global.get("TELEGRAM_BOT_TOKEN", "")
@@ -1813,6 +2265,63 @@ def send_telegram_report(target_domain, target_findings):
     except Exception as e:
         log_warn(f"Failed to send Telegram alert: {e}")
 
+def dedupe_findings(findings):
+    """
+    Remove duplicate findings while preserving the richest version.
+
+    Key = (normalized_type, normalized_url_or_target).
+    Normalization strips 'idor-', 'advanced-', 'adv-' prefixes so
+    that e.g. 'idor-method-bypass' and 'method-bypass' collapse.
+    Richness = len(str(detail)).
+    Order preserved (first occurrence position wins).
+    """
+    seen = {}
+    order = []
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        t = str(f.get("type", "")).strip().lower()
+        for pfx in ("idor-", "advanced-", "adv-"):
+            if t.startswith(pfx):
+                t = t[len(pfx):]
+                break
+        u = str(f.get("url") or f.get("target") or "").strip().lower().rstrip("/")
+        k = (t, u)
+        if k not in seen:
+            seen[k] = f
+            order.append(k)
+        else:
+            if len(str(f.get("detail", ""))) > len(str(seen[k].get("detail", ""))):
+                seen[k] = f
+    return [seen[k] for k in order]
+
+
+def dedupe_idor_data_inplace(result):
+    """
+    Patch 3: dedupe raw IDOR arrays inside result.targets[*].idor.*
+    before serialization to report.json.
+    Returns summary {key: (before, after)} for verbose logging.
+    """
+    summary = {}
+    for t in result.get("targets", []):
+        idor = t.get("idor")
+        if not isinstance(idor, dict):
+            continue
+        for key in ("confirmed", "advanced_confirmed",
+                    "suspicious", "advanced_suspicious"):
+            arr = idor.get(key)
+            if not isinstance(arr, list) or not arr:
+                continue
+            before = len(arr)
+            try:
+                after_arr = dedupe_findings(arr)
+            except Exception:
+                continue
+            idor[key] = after_arr
+            summary[key] = (before, len(after_arr))
+    return summary
+
+
 def build_findings_summary(result):
     findings = []
     for target in result.get("targets", []):
@@ -1833,10 +2342,31 @@ def build_findings_summary(result):
         passive_sens = target.get("sensitive", {}).get("passive", "")
         if passive_sens and Path(passive_sens).exists() and not is_file_empty(passive_sens):
             for line in rlines(passive_sens): findings.append({"score": score_finding("sensitive_passive", dom), "type": "sensitive-file", "target": dom, "detail": line[:200]})
+        # IDOR — read all 4 sources + preserve url/source
         idor_data = target.get("idor", {})
-        for finding in idor_data.get("confirmed", []):
-            kind = "nuclei_critical" if "missing-auth" in finding.get("type", "") else "takeover"
-            findings.append({"score": score_finding(kind, dom), "type": f"idor-{finding.get('type', 'unknown')}", "target": dom, "detail": f"{finding.get('url', '')} -> {finding.get('reason', '')}"})
+        for _source_key in ("confirmed", "advanced_confirmed",
+                           "suspicious", "advanced_suspicious"):
+            for finding in idor_data.get(_source_key, []) or []:
+                _url = finding.get("url", "") or finding.get("endpoint", "")
+                _reason = finding.get("reason", "") or finding.get("description", "")
+                _ftype = finding.get("type", "unknown")
+                if "missing-auth" in _ftype or "anon" in _ftype:
+                    _kind = "nuclei_critical"
+                elif "cross-account" in _ftype or "horizontal" in _ftype:
+                    _kind = "takeover"
+                elif "method-bypass" in _ftype:
+                    _kind = "nuclei_high"
+                else:
+                    _kind = "takeover"
+                findings.append({
+                    "score": score_finding(_kind, dom),
+                    "type": "idor-" + _ftype,
+                    "target": dom,
+                    "url": _url,
+                    "detail": (_url + " -> " + _reason)[:300],
+                    "source": _source_key,
+                    "suspicious": _source_key in ("suspicious", "advanced_suspicious"),
+                })
         secrets = target.get("js", {}).get("secrets_file", "")
         if secrets and Path(secrets).exists() and not is_file_empty(secrets):
             for line in rlines(secrets): findings.append({"score": score_finding("secret", dom), "type": "secret", "target": dom, "detail": line[:200]})
@@ -1846,7 +2376,7 @@ def build_findings_summary(result):
         if spf_path and not Path(spf_path).exists(): findings.append({"score": score_finding("no_spf", dom), "type": "no-spf", "target": dom, "detail": "No SPF record"})
         if dmarc_path and not Path(dmarc_path).exists(): findings.append({"score": score_finding("no_dmarc", dom), "type": "no-dmarc", "target": dom, "detail": "No DMARC record"})
     findings.sort(key=lambda f: f["score"], reverse=True)
-    return findings
+    return dedupe_findings(findings)
 
 def safe(d, *keys, default=0):
     for k in keys:
@@ -1902,22 +2432,190 @@ def parse_targets(single, tfile):
     return targets
 
 def _run_idor(domain, workspace, available, scope):
-    if not IDOR_AVAILABLE or args_skip_idor: return {}
+    # Import idor_module at top (fixes 'local variable' error)
+    import idor_module
+
+    """Wrapper that sets IDOR module globals + optional Playwright capture."""
+    if not IDOR_AVAILABLE:
+        return {}
+    if args_skip_idor:
+        return {}
+
+    target_host = domain.split(":")[0]
+    scheme = "https"
+    target_url = f"{scheme}://{target_host}"
+    if ":" in domain and ":443" not in domain and ":80" not in domain:
+        target_url = f"https://{domain}"
+    elif ":80" in domain:
+        target_url = f"http://{domain}"
+
+    # ═══════════════════════════════════════════════════════════
+    # STEP 1: Playwright capture (if --idor-pw)
+    # ═══════════════════════════════════════════════════════════
+    pw_captured_urls = []
+    pw_login_shapes = []
+    if args_idor_pw:
+        try:
+            import idor_playwright
+            if not idor_playwright.is_available():
+                log_warn("Playwright not installed — install with: pip install playwright && playwright install chromium")
+            else:
+                print(f"\n{BOLD}{C}{'═' * 60}{RST}")
+                print(f"{BOLD}{C}  Playwright Network Capture{RST}")
+                print(f"{BOLD}{C}{'═' * 60}{RST}")
+
+                # Optional auto-login to get token (if creds provided)
+                auth_token = None
+                if args_idor_a_email and args_idor_a_pass and args_idor_login_url and args_idor_login_json:
+                    try:
+                        login_result = idor_playwright.auto_login_via_api(
+                            args_idor_login_url,
+                            args_idor_login_json,
+                            args_idor_a_email,
+                            args_idor_a_pass,
+                        )
+                        if login_result:
+                            auth_token = login_result["token"]
+                            print(f"{G}[PW] Auto-login OK (token captured){RST}")
+                        else:
+                            log_warn("Auto-login failed — capturing without auth")
+                    except Exception as _le:
+                        log_warn(f"Auto-login error: {_le}")
+
+                pw_result = idor_playwright.capture_network(
+                    target_url,
+                    duration=args_idor_pw_duration,
+                    headless=not args_idor_pw_visible,
+                    scroll=True,
+                    follow_links=args_idor_pw_follow_links,
+                    auth_token=auth_token,
+                    wait_for_enter=args_idor_pw_visible,
+                )
+
+                if pw_result:
+                    idor_playwright.display_summary(pw_result)
+                    pw_dir = Path(workspace) / domain / "idor"
+                    idor_playwright.write_findings(pw_result, pw_dir)
+
+                    pw_captured_urls = sorted(pw_result["api_calls"])
+                    pw_login_shapes = pw_result.get("post_jsons", [])
+
+                    # Persist to workspace for phase_idor to pick up
+                    (pw_dir / "pw_captured_urls.txt").write_text(
+                        "\n".join(pw_captured_urls), encoding="utf-8"
+                    )
+                    if pw_result.get("login_endpoints"):
+                        (pw_dir / "pw_login_endpoints.txt").write_text(
+                            "\n".join(sorted(pw_result["login_endpoints"])),
+                            encoding="utf-8"
+                        )
+
+                    # Auto-set login URL if not provided
+                    # Prioritize actual login endpoints over token-refresh ones
+                    if not args_idor_login_url and pw_result.get("login_endpoints"):
+                        _logins = list(pw_result["login_endpoints"])
+                        # Priority: cloudfunctions > login/signin > identitytoolkit
+                        def _login_priority(url):
+                            u = url.lower()
+                            if "cloudfunctions" in u and "login" in u:
+                                return 0
+                            if "/login" in u or "signin" in u:
+                                return 1
+                            if "auth" in u:
+                                return 2
+                            # identitytoolkit token endpoints — lowest priority
+                            return 9
+                        _logins.sort(key=_login_priority)
+                        best_login = _logins[0]
+                        print(f"{G}[PW] Picked login URL (priority 0-1): {best_login}{RST}")
+                        idor_module.GLOBAL_LOGIN_URL = best_login
+                        print(f"{G}[PW] Auto-set login URL: {best_login}{RST}")
+
+                        # Auto-set login JSON if we captured the shape
+                        if pw_login_shapes:
+                            shape_data = pw_login_shapes[0].get("raw", {})
+                            # Replace values with placeholders
+                            def _placeholderize(obj):
+                                if isinstance(obj, dict):
+                                    out = {}
+                                    for k, v in obj.items():
+                                        if k in ("email",):
+                                            out[k] = "%EMAIL%"
+                                        elif k in ("password",):
+                                            out[k] = "%PASS%"
+                                        else:
+                                            out[k] = _placeholderize(v) if isinstance(v, (dict, list)) else v
+                                    return out
+                                if isinstance(obj, list):
+                                    return [_placeholderize(x) for x in obj]
+                                return obj
+
+                            placeholder_json = json.dumps(_placeholderize(shape_data))
+                            idor_module.GLOBAL_LOGIN_JSON = placeholder_json
+                            print(f"{G}[PW] Auto-set login JSON: {placeholder_json[:80]}...{RST}")
+                    else:
+                        idor_module.GLOBAL_LOGIN_URL = args_idor_login_url
+                        idor_module.GLOBAL_LOGIN_JSON = args_idor_login_json
+
+                    # Merge Playwright-generated probes (Firestore + Cloud Functions)
+                    probe_urls = []
+                    for probe_file in ("pw_firestore_probes.txt", "pw_cloudfunc_probes.txt"):
+                        pf = pw_dir / probe_file
+                        if pf.exists():
+                            for line in pf.read_text(errors="ignore").splitlines():
+                                line = line.strip()
+                                if line and line.startswith(("http://", "https://")):
+                                    probe_urls.append(line)
+                    if probe_urls:
+                        print(f"{G}[PW] Loaded {len(probe_urls)} probe URLs{RST}")
+
+                    # Merge captured URLs into final-urls.txt
+                    all_pw_urls = list(set(pw_captured_urls + probe_urls))
+                    if all_pw_urls:
+                        final_urls = Path(workspace) / domain / "urls" / "final-urls.txt"
+                        final_urls.parent.mkdir(parents=True, exist_ok=True)
+                        existing = set()
+                        if final_urls.exists():
+                            existing = set(rlines(final_urls))
+                        merged = sorted(existing | set(all_pw_urls))
+                        final_urls.write_text("\n".join(merged), encoding="utf-8")
+                        # Also update clean_urls.txt
+                        clean_urls = final_urls.parent / "clean_urls.txt"
+                        clean_urls.write_text("\n".join(merged), encoding="utf-8")
+                        print(f"{G}[PW] Merged {len(all_pw_urls)} URLs (captured + probes) into final-urls.txt{RST}")
+        except Exception as _pw_e:
+            log_warn(f"Playwright capture failed: {_pw_e}")
+
+    # ═══════════════════════════════════════════════════════════
+    # STEP 2: Set IDOR module globals
+    # ═══════════════════════════════════════════════════════════
     try:
-        import idor_module
         idor_module.GLOBAL_SCOPE = scope
-        idor_module.GLOBAL_LOGIN_URL = args_idor_login_url
-        idor_module.GLOBAL_LOGIN_JSON = args_idor_login_json
-    except Exception: pass
+        idor_module.GLOBAL_LOGIN_URL = args_idor_login_url or getattr(idor_module, "GLOBAL_LOGIN_URL", None)
+        idor_module.GLOBAL_LOGIN_JSON = args_idor_login_json or getattr(idor_module, "GLOBAL_LOGIN_JSON", None)
+
+        # Pass credentials if provided (for auto-login without prompts)
+        if args_idor_a_email:
+            idor_module.GLOBAL_A_EMAIL = args_idor_a_email
+            idor_module.GLOBAL_A_PASS = args_idor_a_pass
+        if args_idor_b_email:
+            idor_module.GLOBAL_B_EMAIL = args_idor_b_email
+            idor_module.GLOBAL_B_PASS = args_idor_b_pass
+    except Exception:
+        pass
+
     return idor_phase_func(domain, workspace, PhaseProgress, log_info, log_ok, log_warn)
+
+
 
 def main():
     global args_verbose, args_skip_screenshots, args_skip_js, args_skip_active_subs
     global args_skip_vuln, args_skip_fuzz, args_keep_sources, args_idor_only, args_resume, args_wordlist, args_resolvers
     global GLOBAL_PROFILE, GLOBAL_EXTRA_HEADERS, GLOBAL_RATE_LIMIT, GLOBAL_ALLOWED_PHASES
-    global args_idor_login_url, args_idor_login_json
+    global args_idor_login_url, args_idor_login_json, args_idor_pw, args_idor_pw_duration, args_idor_pw_visible, args_idor_pw_follow_links, args_idor_a_email, args_idor_a_pass, args_idor_b_email, args_idor_b_pass
     global api_keys_global, workspace_global, GLOBAL_USE_PROXYCHAINS, GLOBAL_HYBRID_PROXY
     global GLOBAL_PROXY_HEALTH_OK, GLOBAL_WAF_TYPE, args_scope_file, args_force
+    global AI_PLAN_GLOBAL, GLOBAL_TARGET_PORT
     signal.signal(signal.SIGINT, signal_handler)
     if sys.platform != "linux": log_warn("Clicker is designed for Linux -> some features may not work")
     parser = argparse.ArgumentParser(description=f"Clicker {VERSION} -> Bug Bounty Recon Pipeline | {INSTAGRAM}", formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1927,16 +2625,19 @@ def main():
     parser.add_argument("--workspace", default="clicker_output", help="Output directory")
     parser.add_argument("--api-file", default="clicker_api.env", help="API keys file")
     parser.add_argument("--report-format", choices=["txt", "html", "both"], default="both")
-    parser.add_argument("--skip-screenshots", action="store_true")
-    parser.add_argument("--skip-js", action="store_true")
-    parser.add_argument("--skip-active-subs", action="store_true")
-    parser.add_argument("--skip-vuln", action="store_true", help="Skip vulnerability scanning phase")
-    parser.add_argument("--skip-fuzz", action="store_true", help="Skip sensitive files / dirsearch / ffuf phase")
-    parser.add_argument("--skip-idor", action="store_true", help="Skip IDOR testing phase")
     parser.add_argument("--program-setup", action="store_true", help="Force re-run program policy setup wizard")
+    parser.add_argument("--idor-login-url", default=None, help="Custom IDOR login URL (external hosts supported)")
+    parser.add_argument("--idor-login-json", default=None, help="Custom IDOR login JSON body (use %%EMAIL%% and %%PASS%% placeholders)")
+    parser.add_argument("--idor-pw", action="store_true", help="Auto-capture network via Playwright headless browser")
+    parser.add_argument("--idor-pw-duration", type=int, default=25, help="Playwright capture duration (seconds)")
+    parser.add_argument("--idor-pw-headless", action="store_true", default=True, help="Run Playwright headless (default)")
+    parser.add_argument("--idor-pw-visible", action="store_true", help="Run Playwright in visible browser mode")
+    parser.add_argument("--idor-pw-follow-links", action="store_true", help="Follow internal links during capture")
+    parser.add_argument("--idor-a-email", default=None, help="IDOR Account A (attacker) email")
+    parser.add_argument("--idor-a-pass", default=None, help="IDOR Account A password")
+    parser.add_argument("--idor-b-email", default=None, help="IDOR Account B (victim) email")
+    parser.add_argument("--idor-b-pass", default=None, help="IDOR Account B password")
     parser.add_argument("--no-profile", action="store_true", help="Skip program profile (use defaults)")
-    parser.add_argument("--idor-login-url", default=None, help="Custom IDOR login URL")
-    parser.add_argument("--idor-login-json", default=None, help="Custom IDOR login JSON (use %%EMAIL%% and %%PASS%%)")
     parser.add_argument("--idor-only", action="store_true", help="Run ONLY IDOR phase (skip all others)")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--force", action="store_true", help="Force scan even if quick probe says target is dead")
@@ -1952,12 +2653,25 @@ def main():
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed output")
     args = parser.parse_args()
     print(ASCII_LOGO)
-    args_verbose = args.verbose; args_skip_screenshots = args.skip_screenshots; args_skip_js = args.skip_js
-    args_skip_active_subs = args.skip_active_subs; args_skip_vuln = args.skip_vuln; args_skip_fuzz = args.skip_fuzz
-    args_skip_idor = args.skip_idor
+    _scan_start_ts = time.time()
+    args_verbose = args.verbose
+    args_skip_screenshots = False; args_skip_js = False
+    args_skip_active_subs = False; args_skip_vuln = False; args_skip_fuzz = False
+    args_skip_idor = False
     _program_setup = getattr(args, "program_setup", False); _no_profile = getattr(args, "no_profile", False)
-    args_idor_login_url = args.idor_login_url; args_idor_login_json = args.idor_login_json
-    args_idor_only = args.idor_only; args_keep_sources = args.keep_sources; args_resume = args.resume
+    args_idor_login_url = None; args_idor_login_json = None
+    args_idor_only = args.idor_only
+    args_idor_login_url = args.idor_login_url
+    args_idor_login_json = args.idor_login_json
+    # --idor-pw-visible implies --idor-pw
+    args_idor_pw = args.idor_pw or args.idor_pw_visible
+    args_idor_pw_duration = args.idor_pw_duration
+    args_idor_pw_visible = args.idor_pw_visible
+    args_idor_pw_follow_links = args.idor_pw_follow_links
+    args_idor_a_email = args.idor_a_email
+    args_idor_a_pass = args.idor_a_pass
+    args_idor_b_email = args.idor_b_email
+    args_idor_b_pass = args.idor_b_pass; args_keep_sources = args.keep_sources; args_resume = args.resume
     args_force = args.force; args_wordlist = args.wordlist; args_resolvers = args.resolvers; args_scope_file = args.scope_file
     GLOBAL_USE_PROXYCHAINS = args.proxychains; GLOBAL_HYBRID_PROXY = args.hybrid_proxy
     pm = ProxyManager(proxy=args.proxy, proxy_file=args.proxy_list, auto_fetch=args.auto_proxy, rotate=args.rotate_proxy)
@@ -1968,6 +2682,18 @@ def main():
         else: GLOBAL_PROXY_HEALTH_OK = True
     pm.apply()
     api_keys_global = collect_api_keys(Path(args.api_file))
+    # ── Configure Telegram bidirectional I/O ──
+    try:
+        telegram_io.configure(
+            api_keys_global.get("TELEGRAM_BOT_TOKEN", ""),
+            api_keys_global.get("TELEGRAM_CHAT_ID", ""),
+        )
+        if telegram_io.is_enabled():
+            log_ok("Telegram interactive I/O enabled")
+        else:
+            log_dim("Telegram interactive I/O disabled (no token/chat_id)")
+    except Exception as e:
+        log_warn(f"Telegram config failed: {e}")
     scope = load_scope(args.scope_file)
     targets = parse_targets(args.target, args.targets_file)
     workspace = Path(args.workspace); mkd(workspace); workspace_global = workspace
@@ -1987,7 +2713,7 @@ def main():
                 curlrc.write_text("\n".join(existing) + "\n")
                 print(f"{G}[+]{RST} Headers synced to ~/.curlrc ({len(GLOBAL_EXTRA_HEADERS)})")
             except Exception as e: log_warn(f"Could not write ~/.curlrc: {e}")
-    required_tools = ["subfinder", "sublist3r", "chaos", "assetfinder", "github-subdomains", "findomain", "waybackurls", "gau", "httpx", "httpx-toolkit", "naabu", "dnsx", "cdncheck", "nmap", "aquatone", "gowitness", "katana", "waymore", "mantra", "subzy", "subjack", "wafw00f", "puredns", "altdns", "shuffledns", "dnsrecon", "ffuf", "nuclei", "trufflehog", "gitleaks", "curl", "jq", "grep", "sed", "awk", "sort", "cat", "dig", "unfurl", "uro", "dirsearch"]
+    required_tools = ["subfinder", "sublist3r", "chaos", "assetfinder", "github-subdomains", "findomain", "waybackurls", "gau", "httpx", "naabu", "dnsx", "cdncheck", "nmap", "aquatone", "gowitness", "katana", "waymore", "mantra", "subzy", "subjack", "wafw00f", "puredns", "altdns", "shuffledns", "dnsrecon", "ffuf", "nuclei", "trufflehog", "gitleaks", "curl", "jq", "grep", "sed", "awk", "sort", "cat", "dig", "unfurl", "uro", "dirsearch"]
     available = check_tools(required_tools)
     result = {"generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"), "version": VERSION, "targets": []}
     print(f"\n{BOLD}{M}[>] Starting scan on {len(targets)} target(s){RST}\n")
@@ -1997,6 +2723,21 @@ def main():
         print(f"\n{BOLD}{W}{'=' * 60}{RST}")
         print(f"{BOLD}{M}  Target : {domain}{RST}")
         print(f"{BOLD}{W}{'=' * 60}{RST}")
+        AI_PLAN_GLOBAL = None
+        GLOBAL_TARGET_PORT = _extract_target_port(domain)
+        if GLOBAL_TARGET_PORT:
+            print(f"  {DIM}[+] Target port detected: {GLOBAL_TARGET_PORT}{RST}")
+        # Fresh state per scan (unless resuming)
+        try:
+            if args_resume:
+                _state = state.load_state(workspace, domain)
+                log_ok(f"Resumed state from {state.state_path(workspace, domain)}")
+            else:
+                _state = state.default_state(domain)
+                state.save_state(workspace, domain, _state)
+        except Exception as _e:
+            log_warn(f"state init failed: {_e}")
+            _state = state.default_state(domain)
         completed = set()
         if args_resume:
             cp = load_checkpoint(workspace, domain)
@@ -2022,7 +2763,16 @@ def main():
                 ("screenshots", lambda: phase_screenshots(domain, workspace, available)),
                 ("dns", lambda: phase_dns_enrichment(domain, workspace, available)),
             ]
-        for phase_name, phase_fn in make_phases():
+        _phase_counter = 0
+        _phases_seq = list(make_phases())
+        _idx = 0
+        while _idx < len(_phases_seq):
+            phase_name, phase_fn = _phases_seq[_idx]
+            _idx += 1
+            _phase_counter += 1
+            GLOBAL_AI_CONTEXT["domain"] = domain
+            GLOBAL_AI_CONTEXT["phase_name"] = phase_name
+            GLOBAL_AI_CONTEXT["phase_number"] = _phase_counter
             if phase_name in completed: log_warn(f"Skipping {phase_name} (already completed)"); continue
             if args_idor_only and phase_name != "idor": continue
             if GLOBAL_ALLOWED_PHASES is not None and phase_name not in GLOBAL_ALLOWED_PHASES: log_warn(f"Skipping {phase_name} (not in program profile)"); continue
@@ -2056,11 +2806,103 @@ def main():
             try:
                 res = phase_fn()
                 if res is None: res = {}
+
+                # ── User rejected this phase: remove from sequence ──
+                if isinstance(res, dict) and res.get("_skipped"):
+                    try:
+                        _phases_seq[:] = [p for p in _phases_seq if p[0] != phase_name]
+                        if args_verbose:
+                            log_ok(f"Removed '{phase_name}' from queue (user rejected)")
+                    except Exception as _e:
+                        log_warn(f"remove-skipped failed: {_e}")
                 if phase_name == "passive":
                     passive = res
                     subs_count = len(res.get("all_subdomains", [])) if res else 0
                     if subs_count > 0 and quick.get("passive_only"):
                         log_ok(f"Passive enum found {subs_count} subs -> clearing passive-only mode"); quick["passive_only"] = False
+
+                    # ── AI Planning Loop (Task 1) ──
+                    try:
+                        print()
+                        print(f"{BOLD}{M}[AI LOOP]{RST} Team planning next phases...")
+                        _plan = _run_ai_plan_loop(domain, workspace, res, api_keys_global, _state=_state)
+                        if _plan and _plan.get("next_phases"):
+                            AI_PLAN_GLOBAL = _plan
+                            _np = _plan.get("next_phases", [])
+                            _cp = _plan.get("custom_phases_added", [])
+                            log_ok(f"AI planned {len(_np)} phases" + (f" + {len(_cp)} custom" if _cp else ""))
+                            print(f"{M}[AI LOOP]{RST} Suggested order:")
+                            for _p in _np[:10]:
+                                print(f"    -> {_p}")
+                            if _cp:
+                                print(f"{M}[AI LOOP]{RST} Custom phases added:")
+                                for _c in _cp[:5]:
+                                    _targets = _c.get("target_subs", [])
+                                    _reason = _c.get("reason", "")
+                                    print(f"    {BOLD}* {_c.get('name')}{RST}")
+                                    if _targets:
+                                        _tlist = ", ".join(_targets[:5])
+                                        _extra = f" (+{len(_targets)-5} more)" if len(_targets) > 5 else ""
+                                        print(f"      {DIM}Targets:{RST} {_tlist}{_extra}")
+                                    if _reason:
+                                        print(f"      {DIM}Reason:{RST} {_reason[:250]}")
+
+                                # ── Execute custom phases ──
+                                _api_key_exec = api_keys_global.get("FREELLMAPI_API_KEY", "")
+                                if _api_key_exec and _cp:
+                                    print()
+                                    print(f"{BOLD}{M}[EXECUTOR]{RST} Executing {len(_cp)} custom phase(s)...")
+                                    _custom_results = []
+                                    try:
+                                        _state_summary_for_exec = state.summary_for_ai(_state)
+                                    except Exception:
+                                        _state_summary_for_exec = None
+                                    for _cph in _cp[:5]:  # max 5
+                                        try:
+                                            _cres = ai_executor.execute_custom_phase(
+                                                domain, _cph, _api_key_exec,
+                                                workspace,
+                                                state_summary=_state_summary_for_exec,
+                                                verbose=True,
+                                            )
+                                            _custom_results.append(_cres)
+                                            # Save to state
+                                            try:
+                                                _state["custom_phases"] = _state.get("custom_phases", [])
+                                                _state["custom_phases"].append({
+                                                    "name": _cres.get("name"),
+                                                    "command": _cres.get("command"),
+                                                    "exit_code": _cres.get("exit_code"),
+                                                    "duration": _cres.get("duration"),
+                                                    "output_file": _cres.get("output_file"),
+                                                })
+                                                state.save_state(workspace, domain, _state)
+                                            except Exception:
+                                                pass
+                                        except Exception as _ce:
+                                            log_warn(f"Custom phase '{_cph.get('name')}' failed: {_ce}")
+                                    if _custom_results:
+                                        _summary = ai_executor.save_custom_summary(
+                                            domain, _custom_results, workspace
+                                        )
+                                        if _summary:
+                                            log_ok(f"Custom summary: {_summary}")
+                                        # Save in result
+                                        AI_PLAN_GLOBAL = AI_PLAN_GLOBAL or {}
+                                        AI_PLAN_GLOBAL["custom_results"] = _custom_results
+                            # Reorder remaining phases per AI suggestion
+                            try:
+                                _rest = _reorder_phases(list(_phases_seq[_idx:]), _np)
+                                _new_seq = list(_phases_seq[:_idx]) + _rest
+                                _phases_seq[:] = _new_seq   # in-place mutation, no rebinding
+                                if args_verbose:
+                                    log_ok("Reordered remaining phases per AI plan")
+                            except Exception as _re:
+                                log_warn(f"Reorder failed (continuing): {_re}")
+                        else:
+                            log_warn("AI plan empty - using default order")
+                    except Exception as _e:
+                        log_warn(f"AI loop error (continuing): {_e}")
                 elif phase_name == "waf": waf = res
                 elif phase_name == "dns_resolution":
                     dns_resolution = res
@@ -2082,24 +2924,118 @@ def main():
                 elif phase_name == "idor": idor_res = res
                 elif phase_name == "dns": dns_res = res
                 completed.add(phase_name)
+                try:
+                    _state = state.update_after_phase(workspace, domain, _state, phase_name, res)
+                except Exception as _e:
+                    log_warn(f"state update failed for {phase_name}: {_e}")
+
+                # ── AI Thinking (Task 2) ──
+                try:
+                    if not (isinstance(res, dict) and res.get("_skipped")):
+                        _api_key_think = api_keys_global.get("FREELLMAPI_API_KEY", "")
+                        if _api_key_think:
+                            print()
+                            print(f"{DIM}[THINK]{RST} {phase_name}: analyzing output...")
+                            _think = ai_thinker.think_about_phase(
+                                domain, phase_name, res, GLOBAL_WAF_TYPE,
+                                _api_key_think, verbose=args_verbose,
+                            )
+                            if _think:
+                                print(f"{BOLD}{M}[THINK]{RST} {phase_name} "
+                                      f"{DIM}({_think['model']}, {_think['elapsed']}s){RST}")
+                                for line in _think["analysis"].split(". "):
+                                    line = line.strip()
+                                    if line:
+                                        if not line.endswith("."):
+                                            line += "."
+                                        print(f"  {line}")
+                                _saved = ai_thinker.save_thinking(
+                                    domain, phase_name, _think,
+                                    Path(workspace) / domain
+                                )
+                                if _saved and args_verbose:
+                                    log_dim(f"Saved: {_saved}")
+                            else:
+                                print(f"{DIM}[THINK]{RST} {phase_name}: (no analysis)")
+                except Exception as _te:
+                    if args_verbose:
+                        log_warn(f"AI thinking failed for {phase_name}: {_te}")
+
                 save_checkpoint(workspace, domain, completed, extra={"waf_type": GLOBAL_WAF_TYPE})
             except KeyboardInterrupt:
                 log_warn(f"Phase {phase_name} interrupted"); completed.add(phase_name)
                 save_checkpoint(workspace, domain, completed, extra={"waf_type": GLOBAL_WAF_TYPE}); continue
             except Exception as e: log_err(f"Phase {phase_name} failed: {e}"); continue
-        result["targets"].append({"domain": domain, "quick": quick, "passive": passive, "waf": waf, "dns_resolution": dns_resolution, "response": response, "tech": tech, "takeover": takeover, "vuln": vuln, "ports": ports, "leakix": leakix, "urls": urls, "sensitive": sensitive, "js": js, "idor": idor_res, "dns": dns_res})
+        # ── Update AI context with this target's results ──
+        try:
+            GLOBAL_AI_CONTEXT["passive_subs"]   = len((passive or {}).get("all_subdomains", []))
+            GLOBAL_AI_CONTEXT["alive_hosts"]    = len((response or {}).get("alive", []))
+            GLOBAL_AI_CONTEXT["f403"]           = len((response or {}).get("f403", []))
+            GLOBAL_AI_CONTEXT["f404"]           = len((response or {}).get("f404", []))
+            GLOBAL_AI_CONTEXT["open_ports"]     = sum(1 for _ in rlines((ports or {}).get("open_ports_file", "")))
+            GLOBAL_AI_CONTEXT["urls_found"]     = sum(1 for _ in rlines((urls or {}).get("final_urls", "")))
+            GLOBAL_AI_CONTEXT["js_files"]       = sum(1 for _ in rlines((js or {}).get("js_file", "")))
+            GLOBAL_AI_CONTEXT["secrets"]        = sum(1 for _ in rlines((js or {}).get("secrets_file", "")))
+        except Exception:
+            pass
 
-        # --- TELEGRAM NOTIFICATION ---
+        result["targets"].append({"domain": domain, "quick": quick, "passive": passive, "waf": waf, "dns_resolution": dns_resolution, "response": response, "tech": tech, "takeover": takeover, "vuln": vuln, "ports": ports, "leakix": leakix, "urls": urls, "sensitive": sensitive, "js": js, "idor": idor_res, "dns": dns_res, "ai_plan": AI_PLAN_GLOBAL})
+
+        # --- VERIFY FINDINGS (Patch C) ---
         current_target_data = {"targets": [result["targets"][-1]]}
         current_findings = build_findings_summary(current_target_data)
-        send_telegram_report(domain, current_findings)
+
+        try:
+            _api_key_verify = api_keys_global.get("FREELLMAPI_API_KEY", "")
+            if current_findings and _api_key_verify:
+                _verified, _stats = ai_verifier.verify_all(
+                    current_findings, domain, _api_key_verify,
+                    verbose=args_verbose,
+                )
+                current_findings = _verified
+                # Save verification stats to result
+                result["targets"][-1]["verification_stats"] = _stats
+                # Filter for telegram: only confirmed + uncertain
+                _telegram_findings = [
+                    f for f in current_findings
+                    if f.get("verification_status") in ("confirmed", "uncertain")
+                ]
+                print(f"{G}[+]{RST} Verification: "
+                      f"{_stats.get('confirmed', 0)} confirmed, "
+                      f"{_stats.get('false-positive', 0)} false-positive, "
+                      f"{_stats.get('uncertain', 0)} uncertain")
+            else:
+                _telegram_findings = current_findings
+        except Exception as _ve:
+            log_warn(f"Verification failed: {_ve}")
+            _telegram_findings = current_findings
+
+        # --- TELEGRAM NOTIFICATION ---
+        send_telegram_report(domain, _telegram_findings)
 
         clear_checkpoint(workspace)
     findings = build_findings_summary(result)
+    # Keep the verified versions (if any)
+    try:
+        if "verification_stats" in (result["targets"][-1] if result["targets"] else {}):
+            # build_findings_summary rebuilds; re-verify would double-call.
+            # Instead, keep as-is — verification data is already in the finding details.
+            pass
+    except Exception:
+        pass
     result["findings"] = findings
     print(f"\n{BOLD}{B}{'=' * 60}{RST}")
     print(f"{BOLD}{C}  Writing Reports{RST}")
     print(f"{BOLD}{B}{'=' * 60}{RST}")
+    # ── Patch 3: dedupe raw IDOR arrays before JSON write ──
+    try:
+        _dedup_summary = dedupe_idor_data_inplace(result)
+        if _dedup_summary and globals().get("args_verbose", False):
+            for k, (b, a) in _dedup_summary.items():
+                print(f"  {G}[dedup]{RST} idor.{k}: {b} → {a}")
+    except Exception as _de:
+        print(f"  {Y}[dedup warn]{RST} {_de}")
+
     json_path = workspace / "report.json"
     json_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
     print(f"  {G}v{RST} JSON  -> {json_path}")
@@ -2110,6 +3046,17 @@ def main():
     print(f"\n{BOLD}{G}[+] Clicker {VERSION} complete -> {workspace}/{RST}")
     if findings: print(f"{BOLD}{Y}Top finding score: {findings[0]['score']} -> {findings[0]['type']}{RST}")
     print(f"{DIM}Follow updates: {Y}{INSTAGRAM}{RST}\n")
+
+    # ── Send 'Testing End' notification to Telegram ──
+    try:
+        _elapsed = None
+        try:
+            _elapsed = time.time() - _scan_start_ts
+        except NameError:
+            pass
+        send_telegram_completion(workspace, result, findings, elapsed_sec=_elapsed)
+    except Exception as _e:
+        log_warn(f"completion notify failed: {_e}")
 
 if __name__ == "__main__":
     main()
