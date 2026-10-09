@@ -18,7 +18,7 @@ _/ ___\|  | |  |/ ___\|  |/ // __ \_  __ \
 **Next-Gen Black-box Recon & Bug Bounty Pipeline**  
 *Automated, Intelligent, and WAF-Aware Reconnaissance for Security Researchers.*
 
-[Get Started »](#-quick-start) · [Follow @403_linux](https://instagram.com/403_linux)
+[Follow @403_linux](https://instagram.com/403_linux)
 
 ---
 
@@ -27,12 +27,11 @@ _/ ___\|  | |  |/ ___\|  |/ // __ \_  __ \
 - [🌟 Why Clicker?](#-why-clicker)
 - [🧠 AI-Powered Orchestration](#-ai-powered-orchestration)
 - [⚡ Key Features](#-key-features)
-- [🚀 Quick Start](#-quick-start)
-- [⚙️ Advanced Usage](#️-advanced-usage)
 - [🎯 IDOR Testing Module](#-idor-testing-module)
 - [📂 Output Structure](#-output-structure)
 - [🔄 Reconnaissance Phases](#-reconnaissance-phases)
 - [🛠️ Project Structure](#️-project-structure)
+- [📊 Current Status](#-current-status)
 - [⚠️ Disclaimer](#️-disclaimer)
 
 ---
@@ -86,107 +85,6 @@ Clicker features a built-in AI layer that acts as smart middleware between the p
 | 🤖 **AI Bypass Engine** | When target returns 401/403/405/500 → AI generates + tests 12 categories of bypasses |
 | ✅ **AI Verifier** | 14 fast-check rules + AI fallback for uncertain findings → 0 uncertain |
 | 📱 **Telegram Integration** | Interactive I/O + real-time findings alerts |
-
----
-
-## 🚀 Quick Start
-
-### 1. Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/darkzone-964/clicker.git
-cd clicker
-
-# Install system dependencies (Debian/Ubuntu/Kali)
-sudo apt update && sudo apt install -y python3-pip massdns nmap curl jq dnsutils
-
-# Install Python-based tools (recommended via pipx)
-pipx install waymore
-pipx install uro
-
-# Make the script executable
-chmod +x clicker.py
-```
-
-### 2. API Setup
-
-On the first run, Clicker will interactively prompt you to save API keys (Chaos, VirusTotal, GitHub, Shodan, LeakIX) into `clicker_api.env`. Keep this file private (`chmod 600`).
-
-### 3. Execute
-
-```bash
-# Basic verbose scan
-python3 clicker.py -t example.com -v
-
-# Scan multiple targets
-python3 clicker.py --targets-file targets.txt --verbose
-```
-
----
-
-## ⚙️ Advanced Usage
-
-### 🛡️ Stealth / Passive-Only Mode
-*Ideal for strict bug bounty programs that prohibit active scanning.*
-
-```bash
-python3 clicker.py -t example.com --skip-active-subs --skip-vuln
-```
-
-### 🎯 IDOR Testing with Custom Authentication
-*Works with any backend — REST, GraphQL, Firebase, Cloud Functions.*
-
-```bash
-python3 clicker.py -t example.com --idor-only \
-  --idor-login-url "https://example.com/api/login" \
-  --idor-login-json '{"email":"%EMAIL%","password":"%PASS%"}' \
-  --idor-a-email "attacker@example.com" \
-  --idor-a-pass "PassA123!" \
-  --idor-b-email "victim@example.com" \
-  --idor-b-pass "PassB123!"
-```
-
-### 🕷️ Playwright Auto-Capture (SPA Targets)
-
-```bash
-python3 clicker.py -t example.com --idor-only \
-  --idor-pw-visible \
-  --idor-login-url "https://api.example.com/login" \
-  --idor-login-json '{"data":{"email":"%EMAIL%","password":"%PASS%"}}' \
-  --idor-a-email "a@example.com" --idor-a-pass "PassA" \
-  --idor-b-email "b@example.com" --idor-b-pass "PassB"
-```
-
-**Auto-close behavior:** The browser closes automatically after:
-- Minimum 15s wait
-- Login URL + 3 API calls captured
-- 8s of quiet (no new requests)
-- OR 180s hard max
-
-### 🌐 Hybrid Proxy Rotation
-
-```bash
-python3 clicker.py -t example.com --auto-proxy --rotate-proxy --hybrid-proxy
-```
-
-### 📋 Scope File
-
-```bash
-python3 clicker.py --targets-file targets.txt --scope-file scope.txt
-```
-
-`scope.txt` format:
-```
-# Include
-*.example.com
-example.com
-api.example.com
-
-# Exclude (prefix with !)
-!blog.example.com
-!*.cdn.example.com
-```
 
 ---
 
@@ -328,7 +226,7 @@ clicker/
 
 ---
 
-## 📊 Current Status (v2.3)
+## 📊 Current Status
 
 | Aspect | Status |
 |---|---|
